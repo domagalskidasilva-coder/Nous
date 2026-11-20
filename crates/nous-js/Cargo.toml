@@ -1,0 +1,19 @@
+[package]
+name = "nous-js"
+description = "Motor JavaScript próprio do Nous"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+oxc_allocator.workspace = true
+oxc_parser.workspace = true
+oxc_ast.workspace = true
+oxc_span.workspace = true
+oxc_str = "0.159"
+ryu-js.workspace = true
+
+[[bin]]
+name = "nous-js"
+path = "src/bin/nous-js.rs"

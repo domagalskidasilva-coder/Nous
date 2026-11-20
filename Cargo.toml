@@ -1,0 +1,60 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "tools/*"]
+default-members = ["crates/nous-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[workspace.dependencies]
+nous-dom = { path = "crates/nous-dom" }
+nous-html = { path = "crates/nous-html" }
+nous-style = { path = "crates/nous-style" }
+nous-layout = { path = "crates/nous-layout" }
+nous-paint = { path = "crates/nous-paint" }
+nous-net = { path = "crates/nous-net" }
+nous-engine = { path = "crates/nous-engine" }
+nous-ui = { path = "crates/nous-ui" }
+
+markup5ever = "0.40"
+html5ever = "0.40"
+vello = "0.12"
+parley = "0.13"
+winit = "0.30"
+url = "2.5"
+pollster = "1"
+arboard = { version = "3", default-features = false }
+memory-stats = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+reqwest = { version = "0.13", default-features = false, features = [
+  "rustls-no-provider",
+  "http2",
+  "gzip",
+  "brotli",
+  "deflate",
+  "cookies",
+  "charset",
+] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+oxc_allocator = "0.159"
+oxc_parser = "0.159"
+oxc_ast = "0.159"
+oxc_span = "0.159"
+ryu-js = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "debuginfo"
+
+# No modo dev, as dependências (vello, parley, html5ever…) compilam otimizadas:
+# o navegador fica usável sem precisar de build release a cada teste.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

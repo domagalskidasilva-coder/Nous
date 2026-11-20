@@ -1,0 +1,12 @@
+[package]
+name = "nous-ui"
+description = "Interface do Nous (abas, omnibox, botões) desenhada com Vello"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nous-paint.workspace = true
+parley.workspace = true
+vello.workspace = true

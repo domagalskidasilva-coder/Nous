@@ -1,0 +1,19 @@
+[package]
+name = "nous-engine"
+description = "API do motor web do Nous (WebView, navegação, histórico)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nous-dom.workspace = true
+nous-html.workspace = true
+nous-style.workspace = true
+nous-layout.workspace = true
+nous-paint.workspace = true
+nous-net.workspace = true
+parley.workspace = true
+vello.workspace = true
+url.workspace = true
+memory-stats.workspace = true

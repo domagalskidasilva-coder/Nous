@@ -1,0 +1,12 @@
+[package]
+name = "nous-layout"
+description = "Layout de blocos e texto do Nous"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nous-dom.workspace = true
+nous-style.workspace = true
+parley.workspace = true

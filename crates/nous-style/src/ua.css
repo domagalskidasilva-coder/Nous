@@ -1,0 +1,56 @@
+/* Folha padrão do Nous: subconjunto da "rendering" section da especificação HTML. */
+
+html, address, blockquote, body, center, dialog, div, figure, figcaption, footer, form,
+header, hr, legend, listing, main, p, plaintext, pre, search, xmp, article, aside,
+h1, h2, h3, h4, h5, h6, hgroup, nav, section, dir, dd, dl, dt, menu, ol, ul,
+fieldset, details, summary, table, caption, thead, tbody, tfoot, tr, td, th, optgroup {
+  display: block;
+}
+
+li { display: list-item; }
+
+head, script, style, link, meta, title, template, noscript, area, base, basefont,
+datalist, param, rp, [hidden], input[type=hidden], dialog:not([open]), select, option {
+  display: none;
+}
+
+img, svg, video, canvas, iframe, input, button, textarea { display: inline-block; }
+
+html { color: #000; font-family: serif; }
+body { margin: 8px; line-height: normal; }
+
+p, blockquote, figure, dl, ul, ol, menu, dir { margin-top: 1em; margin-bottom: 1em; }
+blockquote, figure { margin-left: 40px; margin-right: 40px; }
+dd { margin-left: 40px; }
+ul, ol, menu, dir { padding-left: 40px; }
+ol { list-style-type: decimal; }
+ul ul, ol ul, menu ul { list-style-type: circle; }
+ul ul, ul ol, ol ul, ol ol { margin-top: 0; margin-bottom: 0; }
+
+h1 { font-size: 2em; margin-top: 0.67em; margin-bottom: 0.67em; }
+h2 { font-size: 1.5em; margin-top: 0.83em; margin-bottom: 0.83em; }
+h3 { font-size: 1.17em; margin-top: 1em; margin-bottom: 1em; }
+h4 { margin-top: 1.33em; margin-bottom: 1.33em; }
+h5 { font-size: 0.83em; margin-top: 1.67em; margin-bottom: 1.67em; }
+h6 { font-size: 0.67em; margin-top: 2.33em; margin-bottom: 2.33em; }
+h1, h2, h3, h4, h5, h6, b, strong, th, dt, legend, summary { font-weight: bold; }
+
+i, em, cite, var, dfn, address { font-style: italic; }
+pre, code, kbd, samp, tt, xmp, listing, plaintext { font-family: monospace; }
+pre, xmp, listing, plaintext { white-space: pre; margin-top: 1em; margin-bottom: 1em; }
+small { font-size: smaller; }
+big { font-size: larger; }
+sub, sup { font-size: smaller; }
+u, ins { text-decoration: underline; }
+s, strike, del { text-decoration: line-through; }
+center { text-align: center; }
+nobr { white-space: nowrap; }
+
+a:link { color: #0000ee; text-decoration: underline; }
+mark { background-color: yellow; color: black; }
+
+hr { border-top: 1px solid #a0a0a0; margin-top: 0.5em; margin-bottom: 0.5em; }
+td, th { padding: 1px; }
+th { text-align: center; }
+caption { text-align: center; }
+fieldset { margin-left: 2px; margin-right: 2px; padding: 0.35em 0.75em 0.625em; border: 2px groove #c0c0c0; }

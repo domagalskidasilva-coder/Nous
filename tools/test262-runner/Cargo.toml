@@ -1,0 +1,10 @@
+[package]
+name = "test262-runner"
+description = "Roda a suíte oficial test262 contra o motor JavaScript do Nous"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nous-js = { path = "../../crates/nous-js" }

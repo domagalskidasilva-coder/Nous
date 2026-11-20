@@ -1,0 +1,11 @@
+[package]
+name = "nous-html"
+description = "Parser HTML (html5ever) que monta o DOM do Nous"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nous-dom.workspace = true
+html5ever.workspace = true

@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+*.pdb
+/test262
+/wpt
+.DS_Store
+/capturas

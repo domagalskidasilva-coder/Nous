@@ -1,0 +1,23 @@
+[package]
+name = "nous-app"
+description = "Nous — navegador leve feito em Rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "nous"
+path = "src/main.rs"
+
+[dependencies]
+nous-engine.workspace = true
+nous-ui.workspace = true
+nous-paint.workspace = true
+parley.workspace = true
+vello.workspace = true
+winit.workspace = true
+pollster.workspace = true
+arboard.workspace = true
+url.workspace = true
+png = "0.18"
