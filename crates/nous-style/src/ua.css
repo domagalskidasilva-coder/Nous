@@ -3,18 +3,22 @@
 html, address, blockquote, body, center, dialog, div, figure, figcaption, footer, form,
 header, hr, legend, listing, main, p, plaintext, pre, search, xmp, article, aside,
 h1, h2, h3, h4, h5, h6, hgroup, nav, section, dir, dd, dl, dt, menu, ol, ul,
-fieldset, details, summary, table, caption, thead, tbody, tfoot, tr, td, th, optgroup {
+fieldset, details, summary, caption, thead, tbody, tfoot, optgroup {
   display: block;
 }
+
+table { display: table; }
+tr { display: table-row; }
+td, th { display: table-cell; }
 
 li { display: list-item; }
 
 head, script, style, link, meta, title, template, noscript, area, base, basefont,
-datalist, param, rp, [hidden], input[type=hidden], dialog:not([open]), select, option {
+datalist, param, rp, [hidden], input[type=hidden], dialog:not([open]), option {
   display: none;
 }
 
-img, svg, video, canvas, iframe, input, button, textarea { display: inline-block; }
+img, svg, video, canvas, iframe, input, button, textarea, select { display: inline-block; }
 
 html { color: #000; font-family: serif; }
 body { margin: 8px; line-height: normal; }
@@ -54,3 +58,43 @@ td, th { padding: 1px; }
 th { text-align: center; }
 caption { text-align: center; }
 fieldset { margin-left: 2px; margin-right: 2px; padding: 0.35em 0.75em 0.625em; border: 2px groove #c0c0c0; }
+
+input, textarea, select {
+  font-family: sans-serif;
+  font-size: 13.33px;
+  color: #1d1d28;
+  background-color: #ffffff;
+  border: 1px solid #8f8f9d;
+  border-radius: 4px;
+  padding: 4px 8px;
+  box-sizing: border-box;
+}
+
+button, input[type=submit], input[type=button], input[type=reset] {
+  font-family: sans-serif;
+  font-size: 13.33px;
+  color: #1d1d28;
+  background-color: #e9e9ed;
+  border: 1px solid #8f8f9d;
+  border-radius: 4px;
+  padding: 4px 12px;
+  box-sizing: border-box;
+  text-align: center;
+}
+
+input[type=checkbox], input[type=radio] {
+  padding: 0;
+  border: 1px solid #6b6b78;
+  background-color: #ffffff;
+  width: 15px;
+  height: 15px;
+}
+
+input[type=radio] {
+  border-radius: 50%;
+}
+
+input:disabled, button:disabled, textarea:disabled, select:disabled {
+  color: #777780;
+  background-color: #f2f2f5;
+}

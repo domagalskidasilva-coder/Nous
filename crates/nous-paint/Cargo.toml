@@ -11,3 +11,4 @@ nous-layout.workspace = true
 nous-style.workspace = true
 parley.workspace = true
 vello.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }

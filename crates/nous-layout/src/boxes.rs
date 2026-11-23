@@ -3,8 +3,15 @@
 
 use std::sync::Arc;
 
-use nous_dom::{Document, NodeData, NodeId, local_name};
+use nous_dom::{Document, ElementData, NodeData, NodeId, local_name};
 use nous_style::{ComputedStyle, Display, StyleMap};
+
+pub(crate) fn is_replaced_or_control(el: &ElementData) -> bool {
+    matches!(
+        &**el.local_name(),
+        "img" | "input" | "button" | "textarea" | "select"
+    )
+}
 
 pub(crate) struct BlockBox {
     /// `None` = bloco anônimo (só agrupa conteúdo inline).
@@ -66,6 +73,9 @@ impl<'a> BoxBuilder<'a> {
             return false;
         }
         let s = self.style_of(node).expect("elemento sem estilo");
+        if is_replaced_or_control(el) {
+            return s.is_block_level();
+        }
         s.is_block_level() || (s.display == Display::Inline && self.contains_block(node))
     }
 
@@ -85,16 +95,69 @@ impl<'a> BoxBuilder<'a> {
 
     pub fn build_block(&self, node: NodeId) -> BlockBox {
         let style = self.style_of(node).expect("bloco sem estilo").clone();
+        if let Some(el) = self.doc.element(node)
+            && is_replaced_or_control(el)
+        {
+            return BlockBox {
+                node: Some(node),
+                style,
+                content: BlockContent::Empty,
+            };
+        }
         let children: Vec<NodeId> = self
             .doc
             .children(node)
             .filter(|&c| !self.is_hidden(c))
             .collect();
-        let content = self.build_content(&style, &children);
+        let content = if matches!(style.display, Display::Flex | Display::InlineFlex | Display::Grid) {
+            self.build_flex_grid_content(&style, &children)
+        } else {
+            self.build_content(&style, &children)
+        };
         BlockBox {
             node: Some(node),
             style,
             content,
+        }
+    }
+
+    fn build_flex_grid_content(
+        &self,
+        parent_style: &Arc<ComputedStyle>,
+        children: &[NodeId],
+    ) -> BlockContent {
+        if children.is_empty() {
+            return BlockContent::Empty;
+        }
+        let mut blocks = Vec::new();
+        let mut text_run: Vec<NodeId> = Vec::new();
+        let flush_text = |run: &mut Vec<NodeId>, blocks: &mut Vec<BlockBox>| {
+            if run.is_empty() {
+                return;
+            }
+            if run.iter().all(|&c| self.is_collapsible_whitespace(c)) {
+                run.clear();
+                return;
+            }
+            blocks.push(BlockBox {
+                node: None,
+                style: Arc::new(ComputedStyle::inherit_from(parent_style)),
+                content: BlockContent::Inline(std::mem::take(run)),
+            });
+        };
+        for &c in children {
+            if self.doc.element(c).is_some() {
+                flush_text(&mut text_run, &mut blocks);
+                blocks.push(self.build_block(c));
+            } else {
+                text_run.push(c);
+            }
+        }
+        flush_text(&mut text_run, &mut blocks);
+        if blocks.is_empty() {
+            BlockContent::Empty
+        } else {
+            BlockContent::Blocks(blocks)
         }
     }
 

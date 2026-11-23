@@ -93,7 +93,7 @@ fn alpha(v: Option<&&str>) -> Option<u8> {
 
 fn parse_rgb(args: &str) -> Option<Rgba> {
     let parts = split_args(args);
-    if parts.len() < 3 {
+    if !(3..=4).contains(&parts.len()) {
         return None;
     }
     Some(Rgba::new(
@@ -104,12 +104,26 @@ fn parse_rgb(args: &str) -> Option<Rgba> {
     ))
 }
 
+fn parse_hue(s: &str) -> Option<f32> {
+    if let Some(v) = s.strip_suffix("deg") {
+        v.parse::<f32>().ok()
+    } else if let Some(v) = s.strip_suffix("turn") {
+        v.parse::<f32>().ok().map(|t| t * 360.0)
+    } else if let Some(v) = s.strip_suffix("rad") {
+        v.parse::<f32>().ok().map(|r| r * 180.0 / std::f32::consts::PI)
+    } else if let Some(v) = s.strip_suffix("grad") {
+        v.parse::<f32>().ok().map(|g| g * 0.9)
+    } else {
+        s.parse::<f32>().ok()
+    }
+}
+
 fn parse_hsl(args: &str) -> Option<Rgba> {
     let parts = split_args(args);
-    if parts.len() < 3 {
+    if !(3..=4).contains(&parts.len()) {
         return None;
     }
-    let h = parts[0].trim_end_matches("deg").parse::<f32>().ok()?;
+    let h = parse_hue(parts[0])?;
     let s = parts[1].trim_end_matches('%').parse::<f32>().ok()? / 100.0;
     let l = parts[2].trim_end_matches('%').parse::<f32>().ok()? / 100.0;
     let (r, g, b) = hsl_to_rgb(h, s.clamp(0.0, 1.0), l.clamp(0.0, 1.0));
@@ -213,6 +227,20 @@ fn named(name: &str) -> Option<Rgba> {
         "midnightblue" => 0x191970,
         "darkviolet" => 0x9400d3,
         "rebeccapurple" => 0x663399,
+        "cornflowerblue" => 0x6495ed,
+        "blueviolet" => 0x8a2be2,
+        "deepskyblue" => 0x00bfff,
+        "hotpink" => 0xff69b4,
+        "limegreen" => 0x32cd32,
+        "plum" => 0xdda0dd,
+        "orchid" => 0xda70d6,
+        "turquoise" => 0x40e0d0,
+        "yellowgreen" => 0x9acd32,
+        "mediumpurple" => 0x9370db,
+        "deeppink" => 0xff1493,
+        "darkcyan" => 0x008b8b,
+        "lightsteelblue" => 0xb0c4de,
+        "lightslategray" | "lightslategrey" => 0x778899,
         _ => return None,
     };
     Some(Rgba::new(
@@ -246,6 +274,14 @@ mod tests {
         assert_eq!(
             parse_color("hsl(0, 100%, 50%)"),
             Some(Rgba::new(255, 0, 0, 255))
+        );
+        assert_eq!(
+            parse_color("hsla(120, 100%, 50%, 0.5)"),
+            Some(Rgba::new(0, 255, 0, 128))
+        );
+        assert_eq!(
+            parse_color("hsl(0.5turn 100% 50% / 25%)"),
+            Some(Rgba::new(0, 255, 255, 64))
         );
         assert_eq!(parse_color("Navy"), Some(Rgba::new(0, 0, 128, 255)));
         assert_eq!(
