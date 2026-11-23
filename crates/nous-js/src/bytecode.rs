@@ -44,6 +44,15 @@ pub enum UnOp {
     Void,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UpvalueDesc {
+    /// `true` = captura registrador local do pai imediato;
+    /// `false` = captura upvalue do pai imediato.
+    pub is_local: bool,
+    /// Índice do registrador no pai (se `is_local`) ou índice na tabela de upvalues do pai.
+    pub index: u16,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Op {
     LoadConst {
@@ -93,6 +102,14 @@ pub enum Op {
         cond: Reg,
         target: u32,
     },
+    JumpIfNullish {
+        cond: Reg,
+        target: u32,
+    },
+    JumpIfNotUndefined {
+        cond: Reg,
+        target: u32,
+    },
     /// Lê variável global; lança ReferenceError se não existir.
     GetGlobal {
         dst: Reg,
@@ -111,6 +128,21 @@ pub enum Op {
     DeclareGlobal {
         name: u32,
     },
+    DeleteGlobal {
+        dst: Reg,
+        name: u32,
+    },
+    GetUpvalue {
+        dst: Reg,
+        upvalue: u16,
+    },
+    SetUpvalue {
+        upvalue: u16,
+        src: Reg,
+    },
+    CloseUpvalues {
+        from_reg: Reg,
+    },
     GetNamed {
         dst: Reg,
         obj: Reg,
@@ -120,6 +152,11 @@ pub enum Op {
         obj: Reg,
         name: u32,
         src: Reg,
+    },
+    DeleteNamed {
+        dst: Reg,
+        obj: Reg,
+        name: u32,
     },
     GetKeyed {
         dst: Reg,
@@ -131,6 +168,14 @@ pub enum Op {
         key: Reg,
         src: Reg,
     },
+    DeleteKeyed {
+        dst: Reg,
+        obj: Reg,
+        key: Reg,
+    },
+    CheckObjectNotNullish {
+        src: Reg,
+    },
     NewObject {
         dst: Reg,
     },
@@ -140,6 +185,53 @@ pub enum Op {
     ArrayPush {
         array: Reg,
         src: Reg,
+    },
+    ArrayPushSpread {
+        array: Reg,
+        iterable: Reg,
+    },
+    ObjectAssignSpread {
+        obj: Reg,
+        src: Reg,
+    },
+    ObjectRest {
+        dst: Reg,
+        obj: Reg,
+        excl_start: Reg,
+        excl_count: u16,
+    },
+    DefineMethod {
+        obj: Reg,
+        name: u32,
+        func: Reg,
+        enumerable: bool,
+    },
+    DefineMethodKeyed {
+        obj: Reg,
+        key: Reg,
+        func: Reg,
+        enumerable: bool,
+    },
+    SetupClass {
+        ctor: Reg,
+        super_ctor: Reg,
+    },
+    ForInInit {
+        dst: Reg,
+        obj: Reg,
+    },
+    ForOfInit {
+        dst: Reg,
+        src: Reg,
+    },
+    IterNext {
+        iter: Reg,
+        dst: Reg,
+        done_target: u32,
+    },
+    IterRest {
+        iter: Reg,
+        dst: Reg,
     },
     Closure {
         dst: Reg,
@@ -153,11 +245,42 @@ pub enum Op {
         args: Reg,
         argc: u16,
     },
+    CallSpread {
+        dst: Reg,
+        callee: Reg,
+        this: Reg,
+        args_array: Reg,
+    },
     New {
         dst: Reg,
         callee: Reg,
         args: Reg,
         argc: u16,
+    },
+    NewSpread {
+        dst: Reg,
+        callee: Reg,
+        args_array: Reg,
+    },
+    SuperCall {
+        dst: Reg,
+        args: Reg,
+        argc: u16,
+    },
+    SuperCallSpread {
+        dst: Reg,
+        args_array: Reg,
+    },
+    FinishSuper {
+        src: Reg,
+    },
+    GetSuperNamed {
+        dst: Reg,
+        name: u32,
+    },
+    GetSuperKeyed {
+        dst: Reg,
+        key: Reg,
     },
     Return {
         src: Reg,
@@ -175,12 +298,19 @@ pub enum Op {
 #[derive(Debug)]
 pub struct FunctionCode {
     pub name: Box<str>,
+    /// Quantidade de parâmetros posicionais antes do `...rest`.
     pub params: u16,
+    /// `Function.length` segundo a especificação (antes de parâmetro padrão ou rest).
+    pub length: u16,
+    pub has_rest: bool,
     pub registers: u16,
     pub code: Vec<Op>,
     /// Números e strings internadas usados pela função.
     pub constants: Vec<Value>,
     /// Funções aninhadas criadas por `Closure`.
     pub functions: Vec<Rc<FunctionCode>>,
+    pub upvalues: Vec<UpvalueDesc>,
     pub is_arrow: bool,
+    pub is_class_ctor: bool,
+    pub is_derived_ctor: bool,
 }

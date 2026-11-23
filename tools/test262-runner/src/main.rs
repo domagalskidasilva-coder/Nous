@@ -302,4 +302,23 @@ mod tests {
         assert_eq!(m.negative_type.as_deref(), Some("SyntaxError"));
         assert_eq!(parse_meta("sem frontmatter"), Meta::default());
     }
+
+    #[test]
+    fn fixtures_passam() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let mut tests = Vec::new();
+        collect_tests(&root.join("test"), None, &mut tests);
+        assert!(!tests.is_empty());
+        let mut runner = Runner {
+            root,
+            harness_cache: HashMap::new(),
+        };
+        for t in &tests {
+            match runner.run_test(t) {
+                Outcome::Pass => {}
+                Outcome::Fail(msg) => panic!("fixture {} falhou: {msg}", t.display()),
+                Outcome::Skip(why) => panic!("fixture {} pulada: {why}", t.display()),
+            }
+        }
+    }
 }

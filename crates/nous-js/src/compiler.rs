@@ -1,11 +1,9 @@
 //! Compilador: AST do `oxc` → bytecode de registradores.
 //!
-//! Cada função tem sua janela de registradores. Parâmetros ocupam os primeiros, depois
-//! vêm as variáveis locais (`var` sobe para o começo da função; `let`/`const` vivem no
-//! bloco) e por cima ficam os temporários das expressões, alocados e liberados como uma
-//! pilha. No topo do script, `var`, `let`, `const` e funções viram propriedades do
-//! objeto global, e o registrador 0 guarda o valor da última expressão (o "completion
-//! value" que o REPL mostra).
+//! Cada função tem sua janela de registradores: parâmetros posicionais, eventual
+//! parâmetro `...rest`, variáveis locais (`var` sobe para a função; `let`/`const`/`class`
+//! vivem no bloco) e temporários das expressões. Variáveis locais capturadas por
+//! funções internas usam upvalues (`GetUpvalue` / `SetUpvalue` / `CloseUpvalues`).
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -16,7 +14,7 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 use oxc_str::JSStr;
 
-use crate::bytecode::{BinOp, FunctionCode, Op, Reg, UnOp};
+use crate::bytecode::{BinOp, FunctionCode, Op, Reg, UnOp, UpvalueDesc};
 use crate::heap::Heap;
 use crate::value::Value;
 use crate::vm::{JsError, number_to_string};
@@ -39,7 +37,8 @@ pub fn compile_script(heap: &mut Heap, source: &str) -> CResult<FunctionCode> {
     }
     let mut c = Compiler {
         heap,
-        fns: vec![FnState::new("<script>", 0, false, true)],
+        fns: vec![FnState::new("<script>", 0, 0, false, false, false, false, true)],
+        pending_fields: Vec::new(),
     };
     c.program(&ret.program)?;
     let state = c.fns.pop().expect("estado do script");
@@ -58,6 +57,8 @@ struct LoopCtx {
     breaks: Vec<usize>,
     continues: Vec<usize>,
     try_depth: usize,
+    continue_locals_from: u16,
+    break_locals_from: u16,
     /// `switch` aceita `break` mas não `continue`.
     accepts_continue: bool,
 }
@@ -65,12 +66,17 @@ struct LoopCtx {
 struct FnState {
     name: String,
     params: u16,
+    length: u16,
+    has_rest: bool,
     is_arrow: bool,
+    is_class_ctor: bool,
+    is_derived_ctor: bool,
     is_script: bool,
     code: Vec<Op>,
     constants: Vec<Value>,
     const_map: HashMap<u64, u32>,
     functions: Vec<Rc<FunctionCode>>,
+    upvalues: Vec<UpvalueDesc>,
     scopes: Vec<Scope>,
     next_reg: u16,
     max_reg: u16,
@@ -81,16 +87,31 @@ struct FnState {
 }
 
 impl FnState {
-    fn new(name: &str, params: u16, is_arrow: bool, is_script: bool) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        name: &str,
+        params: u16,
+        length: u16,
+        has_rest: bool,
+        is_arrow: bool,
+        is_class_ctor: bool,
+        is_derived_ctor: bool,
+        is_script: bool,
+    ) -> Self {
         FnState {
             name: name.to_owned(),
             params,
+            length,
+            has_rest,
             is_arrow,
+            is_class_ctor,
+            is_derived_ctor,
             is_script,
             code: Vec::new(),
             constants: Vec::new(),
             const_map: HashMap::new(),
             functions: Vec::new(),
+            upvalues: Vec::new(),
             scopes: vec![Scope {
                 names: Vec::new(),
                 saved_next: 0,
@@ -108,30 +129,36 @@ impl FnState {
         FunctionCode {
             name: self.name.into_boxed_str(),
             params: self.params,
+            length: self.length,
+            has_rest: self.has_rest,
             registers: self.max_reg.max(1),
             code: self.code,
             constants: self.constants,
             functions: self.functions,
+            upvalues: self.upvalues,
             is_arrow: self.is_arrow,
+            is_class_ctor: self.is_class_ctor,
+            is_derived_ctor: self.is_derived_ctor,
         }
     }
 }
 
 enum Res {
     Local(Reg),
+    Upvalue(u16),
     Global,
-    Captured,
 }
 
-struct Compiler<'h> {
+struct Compiler<'h, 'a> {
     heap: &'h mut Heap,
     fns: Vec<FnState>,
+    /// Campos de instância pendentes para injetar logo após `super()` (ou no início do ctor).
+    pending_fields: Vec<(usize, Vec<&'a PropertyDefinition<'a>>)>,
 }
 
 fn js_string(s: JSStr<'_>) -> String {
     match s.as_str() {
         Some(s) => s.to_owned(),
-        // contém surrogate solto: vira U+FFFD (as strings do heap são UTF-8)
         None => String::from_utf16_lossy(&s.encode_utf16().collect::<Vec<u16>>()),
     }
 }
@@ -176,22 +203,36 @@ fn is_simple(e: &Expression<'_>) -> bool {
     )
 }
 
-// ------------------------------------------------- hoisting de `var`
+// ------------------------------------------------- hoisting de `var` e nomes léxicos
 
-fn binding_name<'a>(p: &BindingPattern<'a>) -> Option<&'a str> {
+fn collect_pattern_names<'a>(p: &BindingPattern<'a>, out: &mut Vec<&'a str>) {
     match p {
-        BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
-        _ => None,
+        BindingPattern::BindingIdentifier(id) => out.push(id.name.as_str()),
+        BindingPattern::AssignmentPattern(ap) => collect_pattern_names(&ap.left, out),
+        BindingPattern::ArrayPattern(ap) => {
+            for el in ap.elements.iter().flatten() {
+                collect_pattern_names(el, out);
+            }
+            if let Some(r) = &ap.rest {
+                collect_pattern_names(&r.argument, out);
+            }
+        }
+        BindingPattern::ObjectPattern(op) => {
+            for prop in &op.properties {
+                collect_pattern_names(&prop.value, out);
+            }
+            if let Some(r) = &op.rest {
+                collect_pattern_names(&r.argument, out);
+            }
+        }
     }
 }
 
 fn var_names<'a>(d: &VariableDeclaration<'a>, out: &mut Vec<&'a str>) {
     if d.kind == VariableDeclarationKind::Var {
-        out.extend(
-            d.declarations
-                .iter()
-                .filter_map(|decl| binding_name(&decl.id)),
-        );
+        for decl in &d.declarations {
+            collect_pattern_names(&decl.id, out);
+        }
     }
 }
 
@@ -245,7 +286,40 @@ fn collect_vars<'a>(s: &Statement<'a>, out: &mut Vec<&'a str>) {
     }
 }
 
-impl Compiler<'_> {
+/// Junta nomes de `let`/`const`/`class` diretamente no nível do bloco atual (não recursivo).
+fn collect_lexical<'a>(stmts: &[Statement<'a>], out: &mut Vec<&'a str>) {
+    for s in stmts {
+        match s {
+            Statement::VariableDeclaration(d) if d.kind != VariableDeclarationKind::Var => {
+                for decl in &d.declarations {
+                    collect_pattern_names(&decl.id, out);
+                }
+            }
+            Statement::ClassDeclaration(c) => {
+                if let Some(id) = &c.id {
+                    out.push(id.name.as_str());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn add_upvalue(fn_state: &mut FnState, is_local: bool, index: u16) -> CResult<u16> {
+    if let Some(pos) = fn_state
+        .upvalues
+        .iter()
+        .position(|u| u.is_local == is_local && u.index == index)
+    {
+        return Ok(pos as u16);
+    }
+    let idx = u16::try_from(fn_state.upvalues.len())
+        .map_err(|_| JsError::Unsupported("upvalues demais".into()))?;
+    fn_state.upvalues.push(UpvalueDesc { is_local, index });
+    Ok(idx)
+}
+
+impl<'h, 'a> Compiler<'h, 'a> {
     // --------------------------------------------------------- utilitários
 
     fn f(&mut self) -> &mut FnState {
@@ -267,8 +341,11 @@ impl Compiler<'_> {
             Op::Jump { target }
             | Op::JumpIfFalse { target, .. }
             | Op::JumpIfTrue { target, .. }
-            | Op::JumpIfNotNullish { target, .. } => *target = to,
+            | Op::JumpIfNotNullish { target, .. }
+            | Op::JumpIfNullish { target, .. }
+            | Op::JumpIfNotUndefined { target, .. } => *target = to,
             Op::EnterTry { catch_target, .. } => *catch_target = to,
+            Op::IterNext { done_target, .. } => *done_target = to,
             other => unreachable!("patch em instrução que não é salto: {other:?}"),
         }
     }
@@ -324,7 +401,7 @@ impl Compiler<'_> {
         self.emit(Op::LoadConst { dst, idx });
     }
 
-    // ------------------------------------------------------------ escopos
+    // ------------------------------------------------------------ escopos e upvalues
 
     fn push_scope(&mut self) {
         let f = self.f();
@@ -337,10 +414,18 @@ impl Compiler<'_> {
     }
 
     fn pop_scope(&mut self) {
-        let f = self.f();
-        let s = f.scopes.pop().expect("escopo");
-        f.next_reg = s.saved_next;
-        f.locals_top = s.saved_locals_top;
+        let close_from = {
+            let f = self.f();
+            let s = f.scopes.pop().expect("escopo");
+            let had_locals = f.locals_top > s.saved_locals_top || !s.names.is_empty();
+            let from = s.saved_next;
+            f.next_reg = s.saved_next;
+            f.locals_top = s.saved_locals_top;
+            had_locals.then_some(from)
+        };
+        if let Some(from_reg) = close_from {
+            self.emit(Op::CloseUpvalues { from_reg });
+        }
     }
 
     fn at_script_top(&self) -> bool {
@@ -368,33 +453,46 @@ impl Compiler<'_> {
         Ok(r)
     }
 
-    fn resolve(&self, name: &str) -> Res {
-        let (current, outer) = self.fns.split_last().expect("função atual");
-        for scope in current.scopes.iter().rev() {
-            if let Some(&(_, r)) = scope.names.iter().rev().find(|(n, _)| n == name) {
-                return Res::Local(r);
+    fn resolve_upvalue(&mut self, fn_idx: usize, name: &str) -> CResult<Option<u16>> {
+        if fn_idx == 0 {
+            return Ok(None);
+        }
+        let parent = fn_idx - 1;
+        for scope in self.fns[parent].scopes.iter().rev() {
+            if let Some(&(_, reg)) = scope.names.iter().rev().find(|(n, _)| n == name) {
+                let uv = add_upvalue(&mut self.fns[fn_idx], true, reg)?;
+                return Ok(Some(uv));
             }
         }
-        let captured = outer.iter().any(|f| {
-            f.scopes
-                .iter()
-                .any(|s| s.names.iter().any(|(n, _)| n == name))
-        });
-        if captured { Res::Captured } else { Res::Global }
+        if let Some(parent_uv) = self.resolve_upvalue(parent, name)? {
+            let uv = add_upvalue(&mut self.fns[fn_idx], false, parent_uv)?;
+            return Ok(Some(uv));
+        }
+        Ok(None)
     }
 
-    fn captured_error<T>(name: &str) -> CResult<T> {
-        unsupported(format!(
-            "closure: função interna usando a variável local '{name}' de outra função"
-        ))
+    fn resolve(&mut self, name: &str) -> CResult<Res> {
+        let last = self.fns.len() - 1;
+        for scope in self.fns[last].scopes.iter().rev() {
+            if let Some(&(_, r)) = scope.names.iter().rev().find(|(n, _)| n == name) {
+                return Ok(Res::Local(r));
+            }
+        }
+        if let Some(uv) = self.resolve_upvalue(last, name)? {
+            return Ok(Res::Upvalue(uv));
+        }
+        Ok(Res::Global)
     }
 
     fn load_name(&mut self, name: &str, dst: Reg) -> CResult<()> {
-        match self.resolve(name) {
+        match self.resolve(name)? {
             Res::Local(r) => {
                 if r != dst {
                     self.emit(Op::Move { dst, src: r });
                 }
+            }
+            Res::Upvalue(uv) => {
+                self.emit(Op::GetUpvalue { dst, upvalue: uv });
             }
             Res::Global if name == "undefined" => {
                 self.emit(Op::LoadUndefined { dst });
@@ -403,30 +501,31 @@ impl Compiler<'_> {
                 let idx = self.str_const(name);
                 self.emit(Op::GetGlobal { dst, name: idx });
             }
-            Res::Captured => return Self::captured_error(name),
         }
         Ok(())
     }
 
     fn store_name(&mut self, name: &str, src: Reg) -> CResult<()> {
-        match self.resolve(name) {
+        match self.resolve(name)? {
             Res::Local(r) => {
                 if r != src {
                     self.emit(Op::Move { dst: r, src });
                 }
             }
+            Res::Upvalue(uv) => {
+                self.emit(Op::SetUpvalue { upvalue: uv, src });
+            }
             Res::Global => {
                 let idx = self.str_const(name);
                 self.emit(Op::SetGlobal { name: idx, src });
             }
-            Res::Captured => return Self::captured_error(name),
         }
         Ok(())
     }
 
     // ------------------------------------------------------------ programa
 
-    fn program(&mut self, p: &Program<'_>) -> CResult<()> {
+    fn program(&mut self, p: &'a Program<'a>) -> CResult<()> {
         let completion = self.alloc()?;
         self.f().locals_top = 1;
         self.emit(Op::LoadUndefined { dst: completion });
@@ -444,9 +543,8 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// Cria as funções declaradas numa lista de comandos antes de rodar o resto
-    /// (é o "hoisting" de `function f() {}`).
-    fn hoist_functions(&mut self, stmts: &[Statement<'_>]) -> CResult<()> {
+    /// Cria as funções declaradas numa lista de comandos antes de rodar o resto.
+    fn hoist_functions(&mut self, stmts: &'a [Statement<'a>]) -> CResult<()> {
         for s in stmts {
             let Statement::FunctionDeclaration(func) = s else {
                 continue;
@@ -470,50 +568,118 @@ impl Compiler<'_> {
         Ok(())
     }
 
+    fn pre_declare_lexical(&mut self, stmts: &[Statement<'a>]) -> CResult<()> {
+        if self.at_script_top() {
+            return Ok(());
+        }
+        let mut lex = Vec::new();
+        collect_lexical(stmts, &mut lex);
+        for name in lex {
+            self.declare_local(name)?;
+        }
+        Ok(())
+    }
+
     // ------------------------------------------------------------- funções
 
-    fn function_decl(&mut self, func: &Function<'_>, name: &str) -> CResult<u32> {
+    fn function_decl(&mut self, func: &'a Function<'a>, name: &str) -> CResult<u32> {
         if func.generator {
             return unsupported("generators (function*)");
         }
         if func.r#async {
             return unsupported("funções async");
         }
-        self.function(name, &func.params, func.body.as_deref(), None, false)
+        self.function(
+            name,
+            &func.params,
+            func.body.as_deref(),
+            None,
+            false,
+            false,
+            false,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn function(
         &mut self,
         name: &str,
-        params: &FormalParameters<'_>,
-        body: Option<&FunctionBody<'_>>,
-        expr_body: Option<&Expression<'_>>,
+        params: &'a FormalParameters<'a>,
+        body: Option<&'a FunctionBody<'a>>,
+        expr_body: Option<&'a Expression<'a>>,
         is_arrow: bool,
+        is_class_ctor: bool,
+        is_derived_ctor: bool,
     ) -> CResult<u32> {
-        if params.rest.is_some() {
-            return unsupported("parâmetro rest (...args)");
-        }
-        let mut names = Vec::with_capacity(params.items.len());
-        for p in &params.items {
-            if p.initializer.is_some() {
-                return unsupported("parâmetro com valor padrão");
-            }
-            let Some(n) = binding_name(&p.pattern) else {
-                return unsupported("desestruturação em parâmetros");
-            };
-            names.push(n);
-        }
-        let param_count = u16::try_from(names.len())
+        let param_count = u16::try_from(params.items.len())
             .map_err(|_| JsError::Unsupported("parâmetros demais".into()))?;
-        self.fns
-            .push(FnState::new(name, param_count, is_arrow, false));
-        // parâmetros: registradores 0..n, na ordem
-        for n in names {
-            let r = self.alloc()?;
-            let f = self.f();
-            f.locals_top = f.next_reg;
-            f.scopes[0].names.push((n.to_owned(), r));
+        let has_rest = params.rest.is_some();
+        let js_length = params
+            .items
+            .iter()
+            .take_while(|p| p.initializer.is_none())
+            .count() as u16;
+
+        self.fns.push(FnState::new(
+            name,
+            param_count,
+            js_length,
+            has_rest,
+            is_arrow,
+            is_class_ctor,
+            is_derived_ctor,
+            false,
+        ));
+
+        // Reserva registradores posicionais 0..param_count e +1 para rest
+        let mut pos_regs = Vec::with_capacity(params.items.len());
+        for _ in &params.items {
+            pos_regs.push(self.alloc()?);
         }
+        let rest_reg = if has_rest {
+            Some(self.alloc()?)
+        } else {
+            None
+        };
+        let f = self.f();
+        f.locals_top = f.next_reg;
+
+        // Inicializa defaults e faz destructuring de parâmetros
+        for (p, r) in params.items.iter().zip(pos_regs) {
+            if let Some(init) = &p.initializer {
+                let skip = self.emit(Op::JumpIfNotUndefined { cond: r, target: 0 });
+                self.expr(init, r)?;
+                self.patch_here(skip);
+            }
+            match &p.pattern {
+                BindingPattern::BindingIdentifier(id) => {
+                    self.f().scopes[0]
+                        .names
+                        .push((id.name.as_str().to_owned(), r));
+                }
+                pat => {
+                    self.bind_pattern(pat, r, false, false)?;
+                }
+            }
+        }
+        if let (Some(rest), Some(r_reg)) = (&params.rest, rest_reg) {
+            match &rest.rest.argument {
+                BindingPattern::BindingIdentifier(id) => {
+                    self.f().scopes[0]
+                        .names
+                        .push((id.name.as_str().to_owned(), r_reg));
+                }
+                pat => {
+                    self.bind_pattern(pat, r_reg, false, false)?;
+                }
+            }
+        }
+
+        // Em construtor de classe base, campos de instância rodam antes do corpo
+        if is_class_ctor && !is_derived_ctor {
+            self.emit_pending_fields_for_current_fn()?;
+        }
+
         if let Some(body) = body {
             let mut vars = Vec::new();
             body.statements
@@ -522,6 +688,7 @@ impl Compiler<'_> {
             for v in vars {
                 self.declare_local(v)?;
             }
+            self.pre_declare_lexical(&body.statements)?;
             self.hoist_functions(&body.statements)?;
             for s in &body.statements {
                 self.statement(s)?;
@@ -541,16 +708,43 @@ impl Compiler<'_> {
         Ok((f.functions.len() - 1) as u32)
     }
 
+    fn emit_pending_fields_for_current_fn(&mut self) -> CResult<()> {
+        let depth = self.fns.len() - 1;
+        let Some(pos) = self.pending_fields.iter().rposition(|(d, _)| *d == depth) else {
+            return Ok(());
+        };
+        let fields = self.pending_fields[pos].1.clone();
+        if fields.is_empty() {
+            return Ok(());
+        }
+        let m = self.mark();
+        let this_reg = self.alloc()?;
+        self.emit(Op::LoadThis { dst: this_reg });
+        for prop in fields {
+            let m2 = self.mark();
+            let val_reg = self.alloc()?;
+            if let Some(init) = &prop.value {
+                self.expr(init, val_reg)?;
+            } else {
+                self.emit(Op::LoadUndefined { dst: val_reg });
+            }
+            self.set_property_key(this_reg, &prop.key, prop.computed, val_reg)?;
+            self.release(m2);
+        }
+        self.release(m);
+        Ok(())
+    }
+
     // ------------------------------------------------------------ comandos
 
-    fn statement(&mut self, s: &Statement<'_>) -> CResult<()> {
+    fn statement(&mut self, s: &'a Statement<'a>) -> CResult<()> {
         let m = self.mark();
         self.statement_inner(s)?;
         self.release(m);
         Ok(())
     }
 
-    fn statement_inner(&mut self, s: &Statement<'_>) -> CResult<()> {
+    fn statement_inner(&mut self, s: &'a Statement<'a>) -> CResult<()> {
         match s {
             Statement::ExpressionStatement(e) => {
                 if self.fns.last().is_some_and(|f| f.is_script) {
@@ -560,7 +754,6 @@ impl Compiler<'_> {
                 }
             }
             Statement::VariableDeclaration(d) => self.var_decl(d)?,
-            // já criada no hoisting
             Statement::FunctionDeclaration(_) => {}
             Statement::EmptyStatement(_) | Statement::DebuggerStatement(_) => {}
             Statement::BlockStatement(b) => self.block(&b.body)?,
@@ -594,7 +787,8 @@ impl Compiler<'_> {
                 let cond = self.expr_any(&w.test)?;
                 let j_end = self.emit(Op::JumpIfFalse { cond, target: 0 });
                 self.release(m);
-                self.push_loop(true);
+                let ltop = self.f().locals_top;
+                self.push_loop(true, ltop, ltop);
                 self.statement(&w.body)?;
                 self.emit(Op::Jump { target: start });
                 let end = self.here();
@@ -603,7 +797,8 @@ impl Compiler<'_> {
             }
             Statement::DoWhileStatement(w) => {
                 let start = self.here();
-                self.push_loop(true);
+                let ltop = self.f().locals_top;
+                self.push_loop(true, ltop, ltop);
                 self.statement(&w.body)?;
                 let cont = self.here();
                 let cond = self.expr_any(&w.test)?;
@@ -616,6 +811,11 @@ impl Compiler<'_> {
             }
             Statement::ForStatement(fs) => {
                 self.push_scope();
+                let has_lexical_init = matches!(
+                    &fs.init,
+                    Some(ForStatementInit::VariableDeclaration(d)) if d.kind != VariableDeclarationKind::Var
+                );
+                let loop_vars_from = self.f().locals_top;
                 match &fs.init {
                     Some(ForStatementInit::VariableDeclaration(d)) => self.var_decl(d)?,
                     Some(init) => {
@@ -627,6 +827,7 @@ impl Compiler<'_> {
                     }
                     None => {}
                 }
+                let body_locals_from = self.f().locals_top;
                 let start = self.here();
                 let mut j_end = None;
                 if let Some(test) = &fs.test {
@@ -635,9 +836,14 @@ impl Compiler<'_> {
                     j_end = Some(self.emit(Op::JumpIfFalse { cond, target: 0 }));
                     self.release(m);
                 }
-                self.push_loop(true);
+                self.push_loop(true, body_locals_from, loop_vars_from);
                 self.statement(&fs.body)?;
                 let cont = self.here();
+                if has_lexical_init {
+                    self.emit(Op::CloseUpvalues {
+                        from_reg: loop_vars_from,
+                    });
+                }
                 if let Some(update) = &fs.update {
                     let m = self.mark();
                     self.expr_any(update)?;
@@ -650,6 +856,15 @@ impl Compiler<'_> {
                 }
                 self.pop_loop(cont, end);
                 self.pop_scope();
+            }
+            Statement::ForInStatement(fi) => {
+                self.for_in_or_of(&fi.left, &fi.right, &fi.body, true)?;
+            }
+            Statement::ForOfStatement(fo) => {
+                if fo.r#await {
+                    return unsupported("for await..of");
+                }
+                self.for_in_or_of(&fo.left, &fo.right, &fo.body, false)?;
             }
             Statement::BreakStatement(b) => {
                 if b.label.is_some() {
@@ -670,17 +885,96 @@ impl Compiler<'_> {
             Statement::TryStatement(t) => self.try_statement(t)?,
             Statement::SwitchStatement(sw) => self.switch(sw)?,
             Statement::LabeledStatement(l) => self.statement(&l.body)?,
-            Statement::ClassDeclaration(_) => return unsupported("classes"),
-            Statement::ForInStatement(_) => return unsupported("for-in"),
-            Statement::ForOfStatement(_) => return unsupported("for-of"),
+            Statement::ClassDeclaration(c) => self.class_decl(c)?,
             Statement::WithStatement(_) => return unsupported("with"),
             _ => return unsupported("declaração de módulo ou TypeScript"),
         }
         Ok(())
     }
 
-    fn block(&mut self, body: &[Statement<'_>]) -> CResult<()> {
+    fn for_in_or_of(
+        &mut self,
+        left: &'a ForStatementLeft<'a>,
+        right: &'a Expression<'a>,
+        body: &'a Statement<'a>,
+        is_for_in: bool,
+    ) -> CResult<()> {
+        let iter = self.alloc()?;
+        let rhs = self.alloc()?;
+        self.expr(right, rhs)?;
+        self.emit(if is_for_in {
+            Op::ForInInit { dst: iter, obj: rhs }
+        } else {
+            Op::ForOfInit { dst: iter, src: rhs }
+        });
+
         self.push_scope();
+        let has_lexical = matches!(
+            left,
+            ForStatementLeft::VariableDeclaration(d) if d.kind != VariableDeclarationKind::Var
+        );
+        let loop_vars_from = self.f().locals_top;
+
+        // Pré-declara as variáveis léxicas do `for (let/const x ...)` no escopo do laço
+        // antes do início para preservar registradores fixos entre iterações.
+        if let ForStatementLeft::VariableDeclaration(d) = left
+            && has_lexical
+            && !self.at_script_top()
+        {
+            let mut names = Vec::new();
+            for decl in &d.declarations {
+                collect_pattern_names(&decl.id, &mut names);
+            }
+            for name in names {
+                self.declare_local(name)?;
+            }
+        }
+        let body_locals_from = self.f().locals_top;
+        let elem = self.alloc()?;
+        self.f().locals_top = self.f().locals_top.max(elem + 1);
+
+        let start = self.here();
+        let j_done = self.emit(Op::IterNext {
+            iter,
+            dst: elem,
+            done_target: 0,
+        });
+
+        match left {
+            ForStatementLeft::VariableDeclaration(d) => {
+                let is_var = d.kind == VariableDeclarationKind::Var;
+                let is_top = self.at_script_top();
+                if let Some(decl) = d.declarations.first() {
+                    self.bind_pattern(&decl.id, elem, is_var, is_top)?;
+                }
+            }
+            target => {
+                let Some(at) = target.as_assignment_target() else {
+                    return unsupported("alvo de for-in/for-of");
+                };
+                self.assign_target(at, elem)?;
+            }
+        }
+
+        self.push_loop(true, body_locals_from, loop_vars_from);
+        self.statement(body)?;
+        let cont = self.here();
+        if has_lexical {
+            self.emit(Op::CloseUpvalues {
+                from_reg: loop_vars_from,
+            });
+        }
+        self.emit(Op::Jump { target: start });
+        let end = self.here();
+        self.patch(j_done, end);
+        self.pop_loop(cont, end);
+        self.pop_scope();
+        Ok(())
+    }
+
+    fn block(&mut self, body: &'a [Statement<'a>]) -> CResult<()> {
+        self.push_scope();
+        self.pre_declare_lexical(body)?;
         self.hoist_functions(body)?;
         for s in body {
             self.statement(s)?;
@@ -689,55 +983,237 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    fn var_decl(&mut self, d: &VariableDeclaration<'_>) -> CResult<()> {
-        let lexical = d.kind != VariableDeclarationKind::Var;
+    fn var_decl(&mut self, d: &'a VariableDeclaration<'a>) -> CResult<()> {
+        let is_var = d.kind == VariableDeclarationKind::Var;
+        let is_top = self.at_script_top();
         for decl in &d.declarations {
-            let Some(name) = binding_name(&decl.id) else {
-                return unsupported("desestruturação em declarações");
-            };
-            if lexical && !self.at_script_top() {
-                let r = self.declare_local(name)?;
-                match &decl.init {
-                    Some(e) => self.expr(e, r)?,
-                    None => {
-                        self.emit(Op::LoadUndefined { dst: r });
+            if let Some(init) = &decl.init {
+                let val_reg = match &decl.id {
+                    BindingPattern::BindingIdentifier(id) if !is_var && !is_top => {
+                        self.declare_local(id.name.as_str())?
                     }
-                }
-                continue;
-            }
-            if lexical {
-                let n = self.str_const(name);
-                self.emit(Op::DeclareGlobal { name: n });
-            }
-            let m = self.mark();
-            match &decl.init {
-                Some(e) => {
-                    let t = match self.resolve(name) {
+                    BindingPattern::BindingIdentifier(id) => match self.resolve(id.name.as_str())? {
                         Res::Local(r) => r,
                         _ => self.alloc()?,
-                    };
-                    self.expr(e, t)?;
-                    self.store_name(name, t)?;
-                }
-                None if lexical => {
-                    let t = self.alloc()?;
-                    self.emit(Op::LoadUndefined { dst: t });
-                    self.store_name(name, t)?;
-                }
-                None => {}
+                    },
+                    _ => self.alloc()?,
+                };
+                self.expr(init, val_reg)?;
+                self.bind_pattern(&decl.id, val_reg, is_var, is_top)?;
+            } else if !is_var {
+                let undef = self.alloc()?;
+                self.emit(Op::LoadUndefined { dst: undef });
+                self.bind_pattern(&decl.id, undef, false, is_top)?;
             }
-            self.release(m);
         }
         Ok(())
     }
 
-    fn push_loop(&mut self, accepts_continue: bool) {
+    fn bind_pattern(
+        &mut self,
+        pat: &'a BindingPattern<'a>,
+        src: Reg,
+        is_var: bool,
+        is_top: bool,
+    ) -> CResult<()> {
+        match pat {
+            BindingPattern::BindingIdentifier(id) => {
+                let name = id.name.as_str();
+                if !is_var && !is_top {
+                    let r = self.declare_local(name)?;
+                    if r != src {
+                        self.emit(Op::Move { dst: r, src });
+                    }
+                } else {
+                    if !is_var && is_top {
+                        let n = self.str_const(name);
+                        self.emit(Op::DeclareGlobal { name: n });
+                    }
+                    self.store_name(name, src)?;
+                }
+            }
+            BindingPattern::AssignmentPattern(ap) => {
+                let tmp = self.alloc()?;
+                self.emit(Op::Move { dst: tmp, src });
+                let skip = self.emit(Op::JumpIfNotUndefined {
+                    cond: tmp,
+                    target: 0,
+                });
+                self.expr(&ap.right, tmp)?;
+                self.patch_here(skip);
+                self.bind_pattern(&ap.left, tmp, is_var, is_top)?;
+            }
+            BindingPattern::ArrayPattern(ap) => {
+                let iter = self.alloc()?;
+                self.emit(Op::ForOfInit { dst: iter, src });
+                for el in &ap.elements {
+                    let m = self.mark();
+                    let val = self.alloc()?;
+                    let j = self.emit(Op::IterNext {
+                        iter,
+                        dst: val,
+                        done_target: 0,
+                    });
+                    self.patch_here(j);
+                    if let Some(sub) = el {
+                        self.bind_pattern(sub, val, is_var, is_top)?;
+                    }
+                    self.release(m);
+                }
+                if let Some(rest) = &ap.rest {
+                    let m = self.mark();
+                    let rest_arr = self.alloc()?;
+                    self.emit(Op::IterRest {
+                        iter,
+                        dst: rest_arr,
+                    });
+                    self.bind_pattern(&rest.argument, rest_arr, is_var, is_top)?;
+                    self.release(m);
+                }
+            }
+            BindingPattern::ObjectPattern(op) => {
+                self.emit(Op::CheckObjectNotNullish { src });
+                let has_rest = op.rest.is_some();
+                let mut excl_regs = Vec::new();
+                for prop in &op.properties {
+                    let m = self.mark();
+                    let val = self.alloc()?;
+                    if let Some(k_reg) =
+                        self.get_property_with_key(src, &prop.key, prop.computed, val, has_rest)?
+                    {
+                        excl_regs.push(k_reg);
+                    }
+                    self.bind_pattern(&prop.value, val, is_var, is_top)?;
+                    if !has_rest {
+                        self.release(m);
+                    }
+                }
+                if let Some(rest) = &op.rest {
+                    let rest_obj = self.alloc()?;
+                    let excl_start = self.mark();
+                    let mut consecutive = Vec::with_capacity(excl_regs.len());
+                    for _ in &excl_regs {
+                        consecutive.push(self.alloc()?);
+                    }
+                    for (dst_k, src_k) in consecutive.into_iter().zip(excl_regs) {
+                        if dst_k != src_k {
+                            self.emit(Op::Move {
+                                dst: dst_k,
+                                src: src_k,
+                            });
+                        }
+                    }
+                    let excl_count = u16::try_from(op.properties.len())
+                        .map_err(|_| JsError::Unsupported("chaves demais no rest".into()))?;
+                    self.emit(Op::ObjectRest {
+                        dst: rest_obj,
+                        obj: src,
+                        excl_start,
+                        excl_count,
+                    });
+                    self.bind_pattern(&rest.argument, rest_obj, is_var, is_top)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn get_property_with_key(
+        &mut self,
+        obj: Reg,
+        key: &'a PropertyKey<'a>,
+        computed: bool,
+        dst: Reg,
+        save_key: bool,
+    ) -> CResult<Option<Reg>> {
+        let static_key = if computed {
+            None
+        } else {
+            match key {
+                PropertyKey::StaticIdentifier(id) => Some(id.name.as_str().to_owned()),
+                PropertyKey::StringLiteral(s) => Some(js_string(s.value)),
+                PropertyKey::NumericLiteral(n) => Some(number_to_string(n.value)),
+                PropertyKey::PrivateIdentifier(_) => {
+                    return unsupported("campos privados (#x)");
+                }
+                _ => None,
+            }
+        };
+        match static_key {
+            Some(k) => {
+                let name = self.str_const(&k);
+                self.emit(Op::GetNamed { dst, obj, name });
+                if save_key {
+                    let kr = self.alloc()?;
+                    self.emit(Op::LoadConst { dst: kr, idx: name });
+                    Ok(Some(kr))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => {
+                let Some(ke) = key.as_expression() else {
+                    return unsupported("chave de propriedade");
+                };
+                let kr = self.alloc()?;
+                self.expr(ke, kr)?;
+                self.emit(Op::GetKeyed { dst, obj, key: kr });
+                Ok(save_key.then_some(kr))
+            }
+        }
+    }
+
+    fn set_property_key(
+        &mut self,
+        obj: Reg,
+        key: &'a PropertyKey<'a>,
+        computed: bool,
+        src: Reg,
+    ) -> CResult<()> {
+        let static_key = if computed {
+            None
+        } else {
+            match key {
+                PropertyKey::StaticIdentifier(id) => Some(id.name.as_str().to_owned()),
+                PropertyKey::StringLiteral(s) => Some(js_string(s.value)),
+                PropertyKey::NumericLiteral(n) => Some(number_to_string(n.value)),
+                PropertyKey::PrivateIdentifier(_) => {
+                    return unsupported("campos privados (#x)");
+                }
+                _ => None,
+            }
+        };
+        match static_key {
+            Some(k) => {
+                let name = self.str_const(&k);
+                self.emit(Op::SetNamed { obj, name, src });
+            }
+            None => {
+                let Some(ke) = key.as_expression() else {
+                    return unsupported("chave de propriedade");
+                };
+                let kr = self.alloc()?;
+                self.expr(ke, kr)?;
+                self.emit(Op::SetKeyed { obj, key: kr, src });
+            }
+        }
+        Ok(())
+    }
+
+    fn push_loop(
+        &mut self,
+        accepts_continue: bool,
+        continue_locals_from: u16,
+        break_locals_from: u16,
+    ) {
         let f = self.f();
         let try_depth = f.try_depth;
         f.loops.push(LoopCtx {
             breaks: Vec::new(),
             continues: Vec::new(),
             try_depth,
+            continue_locals_from,
+            break_locals_from,
             accepts_continue,
         });
     }
@@ -753,18 +1229,28 @@ impl Compiler<'_> {
     }
 
     fn jump_out(&mut self, is_continue: bool) -> CResult<()> {
-        let f = self.f();
-        let Some(idx) = f
-            .loops
-            .iter()
-            .rposition(|l| !is_continue || l.accepts_continue)
-        else {
-            return Err(JsError::Syntax("break/continue fora de laço".into()));
+        let (pops, from_reg, idx) = {
+            let f = self.f();
+            let Some(idx) = f
+                .loops
+                .iter()
+                .rposition(|l| !is_continue || l.accepts_continue)
+            else {
+                return Err(JsError::Syntax("break/continue fora de laço".into()));
+            };
+            let pops = f.try_depth - f.loops[idx].try_depth;
+            let from_reg = if is_continue {
+                f.loops[idx].continue_locals_from
+            } else {
+                f.loops[idx].break_locals_from
+            };
+            (pops, from_reg, idx)
         };
-        // sair de blocos try no caminho desativa os seus `catch`
-        let pops = f.try_depth - f.loops[idx].try_depth;
         for _ in 0..pops {
             self.emit(Op::ExitTry);
+        }
+        if self.f().locals_top > from_reg {
+            self.emit(Op::CloseUpvalues { from_reg });
         }
         let j = self.emit(Op::Jump { target: 0 });
         let ctx = &mut self.f().loops[idx];
@@ -776,7 +1262,7 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    fn switch(&mut self, sw: &SwitchStatement<'_>) -> CResult<()> {
+    fn switch(&mut self, sw: &'a SwitchStatement<'a>) -> CResult<()> {
         let disc = self.alloc()?;
         self.expr(&sw.discriminant, disc)?;
         let test = self.alloc()?;
@@ -801,7 +1287,8 @@ impl Compiler<'_> {
         }
         let j_default = self.emit(Op::Jump { target: 0 });
         let mut default_target = None;
-        self.push_loop(false);
+        let ltop = self.f().locals_top;
+        self.push_loop(false, ltop, ltop);
         self.push_scope();
         for (i, case) in sw.cases.iter().enumerate() {
             let label = self.here();
@@ -813,6 +1300,7 @@ impl Compiler<'_> {
                     self.patch(j, label);
                 }
             }
+            self.pre_declare_lexical(&case.consequent)?;
             self.hoist_functions(&case.consequent)?;
             for s in &case.consequent {
                 self.statement(s)?;
@@ -825,7 +1313,7 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    fn try_statement(&mut self, t: &TryStatement<'_>) -> CResult<()> {
+    fn try_statement(&mut self, t: &'a TryStatement<'a>) -> CResult<()> {
         let exc = self.alloc()?;
         let enter = self.emit(Op::EnterTry {
             catch_target: 0,
@@ -843,7 +1331,6 @@ impl Compiler<'_> {
 
         match &t.handler {
             Some(handler) => {
-                // exceção dentro do catch ainda precisa rodar o finally
                 let mut inner = None;
                 if t.finalizer.is_some() {
                     let exc2 = self.alloc()?;
@@ -856,16 +1343,9 @@ impl Compiler<'_> {
                 }
                 self.push_scope();
                 if let Some(param) = &handler.param {
-                    let Some(name) = binding_name(&param.pattern) else {
-                        return unsupported("desestruturação no catch");
-                    };
-                    let f = self.f();
-                    f.scopes
-                        .last_mut()
-                        .expect("escopo")
-                        .names
-                        .push((name.to_owned(), exc));
+                    self.bind_pattern(&param.pattern, exc, false, false)?;
                 }
+                self.pre_declare_lexical(&handler.body.body)?;
                 self.hoist_functions(&handler.body.body)?;
                 for s in &handler.body.body {
                     self.statement(s)?;
@@ -884,7 +1364,6 @@ impl Compiler<'_> {
                 }
             }
             None => {
-                // try/finally sem catch: roda o finally e relança
                 if let Some(fin) = &t.finalizer {
                     self.block(&fin.body)?;
                 }
@@ -895,13 +1374,275 @@ impl Compiler<'_> {
         Ok(())
     }
 
+    // ------------------------------------------------------------ classes
+
+    fn class_decl(&mut self, cls: &'a Class<'a>) -> CResult<()> {
+        let Some(id) = &cls.id else {
+            return Err(JsError::Syntax("declaração de classe precisa de nome".into()));
+        };
+        let name = id.name.as_str();
+        if self.at_script_top() {
+            let m = self.mark();
+            let t = self.alloc()?;
+            self.compile_class(cls, t)?;
+            let n = self.str_const(name);
+            self.emit(Op::DeclareGlobal { name: n });
+            self.emit(Op::SetGlobal { name: n, src: t });
+            self.release(m);
+        } else {
+            let r = self.declare_local(name)?;
+            self.compile_class(cls, r)?;
+        }
+        Ok(())
+    }
+
+    fn compile_class(&mut self, cls: &'a Class<'a>, dst: Reg) -> CResult<()> {
+        let class_name = cls.id.as_ref().map(|i| i.name.as_str()).unwrap_or("");
+        let has_super = cls.heritage.is_some();
+        let super_reg = self.alloc()?;
+        if let Some(heritage) = &cls.heritage {
+            self.expr(&heritage.expression, super_reg)?;
+        } else {
+            self.emit(Op::LoadUndefined { dst: super_reg });
+        }
+
+        let mut ctor_method: Option<&MethodDefinition<'a>> = None;
+        let mut instance_fields: Vec<&'a PropertyDefinition<'a>> = Vec::new();
+
+        for el in &cls.body.body {
+            match el {
+                ClassElement::MethodDefinition(m) => {
+                    if m.kind == MethodDefinitionKind::Constructor {
+                        ctor_method = Some(m);
+                    } else if matches!(m.kind, MethodDefinitionKind::Get | MethodDefinitionKind::Set)
+                    {
+                        return unsupported("getter/setter em classe");
+                    }
+                }
+                ClassElement::PropertyDefinition(p) if !p.r#static => {
+                    instance_fields.push(p);
+                }
+                ClassElement::PropertyDefinition(_) | ClassElement::StaticBlock(_) => {}
+                _ => return unsupported("elemento de classe"),
+            }
+        }
+
+        // Em ClassExpression nomeada, o nome interno é visível dentro dos métodos/ctor.
+        let pushed_expr_name =
+            cls.r#type == ClassType::ClassExpression && !class_name.is_empty();
+        let inner_name_reg = if pushed_expr_name {
+            self.push_scope();
+            Some(self.declare_local(class_name)?)
+        } else {
+            None
+        };
+
+        // Compila o construtor
+        let ctor_depth = self.fns.len();
+        self.pending_fields.push((ctor_depth, instance_fields));
+        let ctor_idx = if let Some(ctor) = ctor_method {
+            let func = &ctor.value;
+            if func.generator || func.r#async {
+                self.pending_fields.pop();
+                return unsupported("constructor async/generator");
+            }
+            self.function(
+                class_name,
+                &func.params,
+                func.body.as_deref(),
+                None,
+                false,
+                true,
+                has_super,
+            )?
+        } else {
+            self.compile_default_ctor(class_name, has_super)?
+        };
+        self.pending_fields.pop();
+
+        self.emit(Op::Closure {
+            dst,
+            func: ctor_idx,
+        });
+        if let Some(ir) = inner_name_reg {
+            self.emit(Op::Move { dst: ir, src: dst });
+        }
+        self.emit(Op::SetupClass {
+            ctor: dst,
+            super_ctor: super_reg,
+        });
+
+        let proto_reg = self.alloc()?;
+        let k_proto = self.str_const("prototype");
+        self.emit(Op::GetNamed {
+            dst: proto_reg,
+            obj: dst,
+            name: k_proto,
+        });
+
+        // Instala métodos, propriedades estáticas e blocos estáticos
+        for el in &cls.body.body {
+            match el {
+                ClassElement::MethodDefinition(m)
+                    if m.kind != MethodDefinitionKind::Constructor =>
+                {
+                    let target_obj = if m.r#static { dst } else { proto_reg };
+                    let m_name = match &m.key {
+                        PropertyKey::StaticIdentifier(id) if !m.computed => id.name.as_str(),
+                        _ => "",
+                    };
+                    let idx = self.function_decl(&m.value, m_name)?;
+                    let fn_reg = self.alloc()?;
+                    self.emit(Op::Closure {
+                        dst: fn_reg,
+                        func: idx,
+                    });
+                    self.define_method_key(target_obj, &m.key, m.computed, fn_reg, false)?;
+                }
+                ClassElement::PropertyDefinition(p) if p.r#static => {
+                    let val_reg = self.alloc()?;
+                    if let Some(init) = &p.value {
+                        self.expr(init, val_reg)?;
+                    } else {
+                        self.emit(Op::LoadUndefined { dst: val_reg });
+                    }
+                    self.set_property_key(dst, &p.key, p.computed, val_reg)?;
+                }
+                ClassElement::StaticBlock(sb) => {
+                    self.fns.push(FnState::new(
+                        "<static>", 0, 0, false, false, false, false, false,
+                    ));
+                    let mut vars = Vec::new();
+                    sb.body.iter().for_each(|s| collect_vars(s, &mut vars));
+                    for v in vars {
+                        self.declare_local(v)?;
+                    }
+                    self.pre_declare_lexical(&sb.body)?;
+                    self.hoist_functions(&sb.body)?;
+                    for s in &sb.body {
+                        self.statement(s)?;
+                    }
+                    let t = self.alloc()?;
+                    self.emit(Op::LoadUndefined { dst: t });
+                    self.emit(Op::Return { src: t });
+                    let st = self.fns.pop().expect("static block");
+                    let code = Rc::new(st.finish());
+                    self.f().functions.push(code);
+                    let idx = (self.f().functions.len() - 1) as u32;
+                    let blk_fn = self.alloc()?;
+                    self.emit(Op::Closure {
+                        dst: blk_fn,
+                        func: idx,
+                    });
+                    let dummy = self.alloc()?;
+                    let args_start = self.mark();
+                    self.emit(Op::Call {
+                        dst: dummy,
+                        callee: blk_fn,
+                        this: dst,
+                        args: args_start,
+                        argc: 0,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        if pushed_expr_name {
+            self.pop_scope();
+        }
+        Ok(())
+    }
+
+    fn compile_default_ctor(&mut self, class_name: &str, has_super: bool) -> CResult<u32> {
+        self.fns.push(FnState::new(
+            class_name,
+            0,
+            0,
+            has_super,
+            false,
+            true,
+            has_super,
+            false,
+        ));
+        if has_super {
+            let args_reg = self.alloc()?; // registrador 0 = ...args
+            self.f().locals_top = self.f().next_reg;
+            let super_res = self.alloc()?;
+            self.emit(Op::SuperCallSpread {
+                dst: super_res,
+                args_array: args_reg,
+            });
+            self.emit(Op::FinishSuper { src: super_res });
+            self.emit_pending_fields_for_current_fn()?;
+            self.emit(Op::Return { src: super_res });
+        } else {
+            self.emit_pending_fields_for_current_fn()?;
+            let t = self.alloc()?;
+            self.emit(Op::LoadUndefined { dst: t });
+            self.emit(Op::Return { src: t });
+        }
+        let state = self.fns.pop().expect("default ctor");
+        let code = Rc::new(state.finish());
+        let f = self.f();
+        f.functions.push(code);
+        Ok((f.functions.len() - 1) as u32)
+    }
+
+    fn define_method_key(
+        &mut self,
+        obj: Reg,
+        key: &'a PropertyKey<'a>,
+        computed: bool,
+        func: Reg,
+        enumerable: bool,
+    ) -> CResult<()> {
+        let static_key = if computed {
+            None
+        } else {
+            match key {
+                PropertyKey::StaticIdentifier(id) => Some(id.name.as_str().to_owned()),
+                PropertyKey::StringLiteral(s) => Some(js_string(s.value)),
+                PropertyKey::NumericLiteral(n) => Some(number_to_string(n.value)),
+                PropertyKey::PrivateIdentifier(_) => {
+                    return unsupported("campos privados (#x)");
+                }
+                _ => None,
+            }
+        };
+        match static_key {
+            Some(k) => {
+                let name = self.str_const(&k);
+                self.emit(Op::DefineMethod {
+                    obj,
+                    name,
+                    func,
+                    enumerable,
+                });
+            }
+            None => {
+                let Some(ke) = key.as_expression() else {
+                    return unsupported("chave de propriedade");
+                };
+                let kr = self.alloc()?;
+                self.expr(ke, kr)?;
+                self.emit(Op::DefineMethodKeyed {
+                    obj,
+                    key: kr,
+                    func,
+                    enumerable,
+                });
+            }
+        }
+        Ok(())
+    }
+
     // ---------------------------------------------------------- expressões
 
-    /// Avalia `e` e devolve um registrador com o resultado (sem cópia se `e` for
-    /// uma variável local).
-    fn expr_any(&mut self, e: &Expression<'_>) -> CResult<Reg> {
+    /// Avalia `e` e devolve um registrador com o resultado (sem cópia se `e` for local).
+    fn expr_any(&mut self, e: &'a Expression<'a>) -> CResult<Reg> {
         if let Expression::Identifier(id) = e
-            && let Res::Local(r) = self.resolve(id.name.as_str())
+            && let Res::Local(r) = self.resolve(id.name.as_str())?
         {
             return Ok(r);
         }
@@ -911,14 +1652,14 @@ impl Compiler<'_> {
     }
 
     /// Avalia `e` deixando o resultado em `dst`.
-    fn expr(&mut self, e: &Expression<'_>, dst: Reg) -> CResult<()> {
+    fn expr(&mut self, e: &'a Expression<'a>, dst: Reg) -> CResult<()> {
         let m = self.mark();
         self.expr_inner(e, dst)?;
         self.release(m);
         Ok(())
     }
 
-    fn expr_inner(&mut self, e: &Expression<'_>, dst: Reg) -> CResult<()> {
+    fn expr_inner(&mut self, e: &'a Expression<'a>, dst: Reg) -> CResult<()> {
         match e {
             Expression::NumericLiteral(n) => self.load_number(dst, n.value),
             Expression::StringLiteral(s) => {
@@ -944,21 +1685,25 @@ impl Compiler<'_> {
                 self.emit(Op::NewArray { dst });
                 for el in &a.elements {
                     let m = self.mark();
-                    let r = match el {
-                        ArrayExpressionElement::SpreadElement(_) => {
-                            return unsupported("spread em array (...x)");
+                    match el {
+                        ArrayExpressionElement::SpreadElement(sp) => {
+                            let r = self.expr_any(&sp.argument)?;
+                            self.emit(Op::ArrayPushSpread {
+                                array: dst,
+                                iterable: r,
+                            });
                         }
                         ArrayExpressionElement::Elision(_) => {
                             let t = self.alloc()?;
                             self.emit(Op::LoadUndefined { dst: t });
-                            t
+                            self.emit(Op::ArrayPush { array: dst, src: t });
                         }
                         other => {
                             let e = other.as_expression().expect("elemento é expressão");
-                            self.expr_any(e)?
+                            let r = self.expr_any(e)?;
+                            self.emit(Op::ArrayPush { array: dst, src: r });
                         }
-                    };
-                    self.emit(Op::ArrayPush { array: dst, src: r });
+                    }
                     self.release(m);
                 }
             }
@@ -974,22 +1719,22 @@ impl Compiler<'_> {
                 }
                 let idx = match &a.body {
                     ArrowFunctionBody::FunctionBody(b) => {
-                        self.function("", &a.params, Some(&**b), None, true)?
+                        self.function("", &a.params, Some(&**b), None, true, false, false)?
                     }
                     other => {
                         let e = other.as_expression().expect("corpo de arrow é expressão");
-                        self.function("", &a.params, None, Some(e), true)?
+                        self.function("", &a.params, None, Some(e), true, false, false)?
                     }
                 };
                 self.emit(Op::Closure { dst, func: idx });
             }
+            Expression::ClassExpression(cls) => self.compile_class(cls, dst)?,
             Expression::UnaryExpression(u) => self.unary(u, dst)?,
             Expression::UpdateExpression(u) => self.update(u, dst)?,
             Expression::BinaryExpression(b) => {
                 let lhs = if is_simple(&b.right) {
                     self.expr_any(&b.left)?
                 } else {
-                    // o lado direito pode mudar a variável da esquerda: copia antes
                     let t = self.alloc()?;
                     self.expr(&b.left, t)?;
                     t
@@ -1027,39 +1772,56 @@ impl Compiler<'_> {
             Expression::NewExpression(n) => {
                 let callee = self.alloc()?;
                 self.expr(&n.callee, callee)?;
-                let (args, argc) = self.arguments(&n.arguments)?;
-                self.emit(Op::New {
-                    dst,
-                    callee,
-                    args,
-                    argc,
-                });
+                if has_spread(&n.arguments) {
+                    let args_array = self.arguments_array(&n.arguments)?;
+                    self.emit(Op::NewSpread {
+                        dst,
+                        callee,
+                        args_array,
+                    });
+                } else {
+                    let (args, argc) = self.arguments(&n.arguments)?;
+                    self.emit(Op::New {
+                        dst,
+                        callee,
+                        args,
+                        argc,
+                    });
+                }
             }
             Expression::StaticMemberExpression(me) => {
                 if me.optional {
-                    return unsupported("encadeamento opcional (?.)");
+                    return unsupported("encadeamento opcional sem ChainExpression");
                 }
-                let obj = self.expr_any(&me.object)?;
                 let name = self.str_const(me.property.name.as_str());
-                self.emit(Op::GetNamed { dst, obj, name });
+                if matches!(&me.object, Expression::Super(_)) {
+                    self.emit(Op::GetSuperNamed { dst, name });
+                } else {
+                    let obj = self.expr_any(&me.object)?;
+                    self.emit(Op::GetNamed { dst, obj, name });
+                }
             }
             Expression::ComputedMemberExpression(me) => {
                 if me.optional {
-                    return unsupported("encadeamento opcional (?.)");
+                    return unsupported("encadeamento opcional sem ChainExpression");
                 }
-                let obj = if is_simple(&me.expression) {
-                    self.expr_any(&me.object)?
+                if matches!(&me.object, Expression::Super(_)) {
+                    let key = self.expr_any(&me.expression)?;
+                    self.emit(Op::GetSuperKeyed { dst, key });
                 } else {
-                    let t = self.alloc()?;
-                    self.expr(&me.object, t)?;
-                    t
-                };
-                let key = self.expr_any(&me.expression)?;
-                self.emit(Op::GetKeyed { dst, obj, key });
+                    let obj = if is_simple(&me.expression) {
+                        self.expr_any(&me.object)?
+                    } else {
+                        let t = self.alloc()?;
+                        self.expr(&me.object, t)?;
+                        t
+                    };
+                    let key = self.expr_any(&me.expression)?;
+                    self.emit(Op::GetKeyed { dst, obj, key });
+                }
             }
+            Expression::ChainExpression(ce) => self.chain(ce, dst)?,
             Expression::PrivateFieldExpression(_) => return unsupported("campos privados (#x)"),
-            Expression::ClassExpression(_) => return unsupported("classes"),
-            Expression::ChainExpression(_) => return unsupported("encadeamento opcional (?.)"),
             Expression::RegExpLiteral(_) => return unsupported("expressões regulares"),
             Expression::BigIntLiteral(_) => return unsupported("BigInt"),
             Expression::TaggedTemplateExpression(_) => return unsupported("template com tag"),
@@ -1075,6 +1837,158 @@ impl Compiler<'_> {
         Ok(())
     }
 
+    fn chain(&mut self, ce: &'a ChainExpression<'a>, dst: Reg) -> CResult<()> {
+        let mut shorts = Vec::new();
+        match &ce.expression {
+            ChainElement::CallExpression(c) => {
+                self.compile_chain_call(c, dst, &mut shorts)?;
+            }
+            ChainElement::StaticMemberExpression(me) => {
+                self.compile_chain_static(me, dst, &mut shorts)?;
+            }
+            ChainElement::ComputedMemberExpression(me) => {
+                self.compile_chain_computed(me, dst, &mut shorts)?;
+            }
+            _ => return unsupported("encadeamento opcional em campo privado"),
+        }
+        if !shorts.is_empty() {
+            let j_end = self.emit(Op::Jump { target: 0 });
+            for s in shorts {
+                self.patch_here(s);
+            }
+            self.emit(Op::LoadUndefined { dst });
+            self.patch_here(j_end);
+        }
+        Ok(())
+    }
+
+    fn compile_chain_expr(
+        &mut self,
+        e: &'a Expression<'a>,
+        dst: Reg,
+        shorts: &mut Vec<usize>,
+    ) -> CResult<()> {
+        match e {
+            Expression::StaticMemberExpression(me) => self.compile_chain_static(me, dst, shorts),
+            Expression::ComputedMemberExpression(me) => {
+                self.compile_chain_computed(me, dst, shorts)
+            }
+            Expression::CallExpression(c) => self.compile_chain_call(c, dst, shorts),
+            other => self.expr(other, dst),
+        }
+    }
+
+    fn compile_chain_static(
+        &mut self,
+        me: &'a StaticMemberExpression<'a>,
+        dst: Reg,
+        shorts: &mut Vec<usize>,
+    ) -> CResult<()> {
+        let obj = self.alloc()?;
+        self.compile_chain_expr(&me.object, obj, shorts)?;
+        if me.optional {
+            shorts.push(self.emit(Op::JumpIfNullish {
+                cond: obj,
+                target: 0,
+            }));
+        }
+        let name = self.str_const(me.property.name.as_str());
+        self.emit(Op::GetNamed { dst, obj, name });
+        Ok(())
+    }
+
+    fn compile_chain_computed(
+        &mut self,
+        me: &'a ComputedMemberExpression<'a>,
+        dst: Reg,
+        shorts: &mut Vec<usize>,
+    ) -> CResult<()> {
+        let obj = self.alloc()?;
+        self.compile_chain_expr(&me.object, obj, shorts)?;
+        if me.optional {
+            shorts.push(self.emit(Op::JumpIfNullish {
+                cond: obj,
+                target: 0,
+            }));
+        }
+        let key = self.expr_any(&me.expression)?;
+        self.emit(Op::GetKeyed { dst, obj, key });
+        Ok(())
+    }
+
+    fn compile_chain_call(
+        &mut self,
+        c: &'a CallExpression<'a>,
+        dst: Reg,
+        shorts: &mut Vec<usize>,
+    ) -> CResult<()> {
+        let callee = self.alloc()?;
+        let this = self.alloc()?;
+        match &c.callee {
+            Expression::StaticMemberExpression(me) => {
+                self.compile_chain_expr(&me.object, this, shorts)?;
+                if me.optional {
+                    shorts.push(self.emit(Op::JumpIfNullish {
+                        cond: this,
+                        target: 0,
+                    }));
+                }
+                let name = self.str_const(me.property.name.as_str());
+                self.emit(Op::GetNamed {
+                    dst: callee,
+                    obj: this,
+                    name,
+                });
+            }
+            Expression::ComputedMemberExpression(me) => {
+                self.compile_chain_expr(&me.object, this, shorts)?;
+                if me.optional {
+                    shorts.push(self.emit(Op::JumpIfNullish {
+                        cond: this,
+                        target: 0,
+                    }));
+                }
+                let m = self.mark();
+                let key = self.expr_any(&me.expression)?;
+                self.emit(Op::GetKeyed {
+                    dst: callee,
+                    obj: this,
+                    key,
+                });
+                self.release(m);
+            }
+            other => {
+                self.compile_chain_expr(other, callee, shorts)?;
+                self.emit(Op::LoadUndefined { dst: this });
+            }
+        }
+        if c.optional {
+            shorts.push(self.emit(Op::JumpIfNullish {
+                cond: callee,
+                target: 0,
+            }));
+        }
+        if has_spread(&c.arguments) {
+            let args_array = self.arguments_array(&c.arguments)?;
+            self.emit(Op::CallSpread {
+                dst,
+                callee,
+                this,
+                args_array,
+            });
+        } else {
+            let (args, argc) = self.arguments(&c.arguments)?;
+            self.emit(Op::Call {
+                dst,
+                callee,
+                this,
+                args,
+                argc,
+            });
+        }
+        Ok(())
+    }
+
     fn logical_jump(&mut self, op: LogicalOperator, cond: Reg) -> usize {
         match op {
             LogicalOperator::And => self.emit(Op::JumpIfFalse { cond, target: 0 }),
@@ -1083,7 +1997,7 @@ impl Compiler<'_> {
         }
     }
 
-    fn template(&mut self, t: &TemplateLiteral<'_>, dst: Reg) -> CResult<()> {
+    fn template(&mut self, t: &'a TemplateLiteral<'a>, dst: Reg) -> CResult<()> {
         let cooked = |q: &TemplateElement<'_>| match q.value.cooked {
             Some(c) => js_string(c),
             None => q.value.raw.as_str().to_owned(),
@@ -1117,51 +2031,25 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    fn object(&mut self, o: &ObjectExpression<'_>, dst: Reg) -> CResult<()> {
+    fn object(&mut self, o: &'a ObjectExpression<'a>, dst: Reg) -> CResult<()> {
         self.emit(Op::NewObject { dst });
         for prop in &o.properties {
-            let ObjectPropertyKind::ObjectProperty(p) = prop else {
-                return unsupported("spread em objeto ({...x})");
-            };
-            if p.kind != PropertyKind::Init {
-                return unsupported("getter/setter em objeto literal");
-            }
             let m = self.mark();
-            let static_key = if p.computed {
-                None
-            } else {
-                match &p.key {
-                    PropertyKey::StaticIdentifier(id) => Some(id.name.as_str().to_owned()),
-                    PropertyKey::StringLiteral(s) => Some(js_string(s.value)),
-                    PropertyKey::NumericLiteral(n) => Some(number_to_string(n.value)),
-                    PropertyKey::PrivateIdentifier(_) => {
-                        return unsupported("campos privados (#x)");
+            match prop {
+                ObjectPropertyKind::SpreadProperty(sp) => {
+                    let src = self.expr_any(&sp.argument)?;
+                    self.emit(Op::ObjectAssignSpread { obj: dst, src });
+                }
+                ObjectPropertyKind::ObjectProperty(p) => {
+                    if p.kind != PropertyKind::Init {
+                        return unsupported("getter/setter em objeto literal");
                     }
-                    _ => None,
-                }
-            };
-            match static_key {
-                Some(key) => {
                     let v = self.expr_any(&p.value)?;
-                    let name = self.str_const(&key);
-                    self.emit(Op::SetNamed {
-                        obj: dst,
-                        name,
-                        src: v,
-                    });
-                }
-                None => {
-                    let Some(ke) = p.key.as_expression() else {
-                        return unsupported("chave de propriedade");
-                    };
-                    let k = self.alloc()?;
-                    self.expr(ke, k)?;
-                    let v = self.expr_any(&p.value)?;
-                    self.emit(Op::SetKeyed {
-                        obj: dst,
-                        key: k,
-                        src: v,
-                    });
+                    if p.method {
+                        self.define_method_key(dst, &p.key, p.computed, v, true)?;
+                    } else {
+                        self.set_property_key(dst, &p.key, p.computed, v)?;
+                    }
                 }
             }
             self.release(m);
@@ -1169,7 +2057,10 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    fn unary(&mut self, u: &UnaryExpression<'_>, dst: Reg) -> CResult<()> {
+    fn unary(&mut self, u: &'a UnaryExpression<'a>, dst: Reg) -> CResult<()> {
+        if u.operator == UnaryOperator::Delete {
+            return self.compile_delete(&u.argument, dst);
+        }
         let op = match u.operator {
             UnaryOperator::UnaryNegation => UnOp::Neg,
             UnaryOperator::UnaryPlus => UnOp::Plus,
@@ -1177,9 +2068,8 @@ impl Compiler<'_> {
             UnaryOperator::BitwiseNot => UnOp::BitNot,
             UnaryOperator::Void => UnOp::Void,
             UnaryOperator::Typeof => {
-                // `typeof x` com x global inexistente não lança erro
                 if let Expression::Identifier(id) = &u.argument
-                    && let Res::Global = self.resolve(id.name.as_str())
+                    && let Res::Global = self.resolve(id.name.as_str())?
                 {
                     let name = self.str_const(id.name.as_str());
                     self.emit(Op::TypeOfGlobal { dst, name });
@@ -1187,21 +2077,55 @@ impl Compiler<'_> {
                 }
                 UnOp::TypeOf
             }
-            UnaryOperator::Delete => return unsupported("delete"),
+            UnaryOperator::Delete => unreachable!(),
         };
         let src = self.expr_any(&u.argument)?;
         self.emit(Op::Unary { op, dst, src });
         Ok(())
     }
 
-    fn update(&mut self, u: &UpdateExpression<'_>, dst: Reg) -> CResult<()> {
+    fn compile_delete(&mut self, arg: &'a Expression<'a>, dst: Reg) -> CResult<()> {
+        match arg {
+            Expression::ParenthesizedExpression(p) => self.compile_delete(&p.expression, dst),
+            Expression::StaticMemberExpression(me) => {
+                let obj = self.expr_any(&me.object)?;
+                let name = self.str_const(me.property.name.as_str());
+                self.emit(Op::DeleteNamed { dst, obj, name });
+                Ok(())
+            }
+            Expression::ComputedMemberExpression(me) => {
+                let obj = self.alloc()?;
+                self.expr(&me.object, obj)?;
+                let key = self.expr_any(&me.expression)?;
+                self.emit(Op::DeleteKeyed { dst, obj, key });
+                Ok(())
+            }
+            Expression::Identifier(id) => match self.resolve(id.name.as_str())? {
+                Res::Global => {
+                    let name = self.str_const(id.name.as_str());
+                    self.emit(Op::DeleteGlobal { dst, name });
+                    Ok(())
+                }
+                _ => {
+                    self.emit(Op::LoadBool { dst, value: false });
+                    Ok(())
+                }
+            },
+            other => {
+                self.expr_any(other)?;
+                self.emit(Op::LoadBool { dst, value: true });
+                Ok(())
+            }
+        }
+    }
+
+    fn update(&mut self, u: &'a UpdateExpression<'a>, dst: Reg) -> CResult<()> {
         let op = match u.operator {
             UpdateOperator::Increment => BinOp::Add,
             UpdateOperator::Decrement => BinOp::Sub,
         };
         let old = self.alloc()?;
         let new = self.alloc()?;
-        // lê o valor atual, converte para número, soma/subtrai 1 e grava
         enum Target {
             Name(String),
             Named(Reg, u32),
@@ -1264,25 +2188,31 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    fn assign(&mut self, a: &AssignmentExpression<'_>, dst: Reg) -> CResult<()> {
+    fn assign(&mut self, a: &'a AssignmentExpression<'a>, dst: Reg) -> CResult<()> {
         let op = a.operator;
         let plain = op == AssignmentOperator::Assign;
         match &a.left {
             AssignmentTarget::AssignmentTargetIdentifier(id) => {
                 let name = id.name.as_str();
                 if plain {
-                    match self.resolve(name) {
+                    match self.resolve(name)? {
                         Res::Local(r) => {
                             self.expr(&a.right, r)?;
                             if r != dst {
                                 self.emit(Op::Move { dst, src: r });
                             }
                         }
+                        Res::Upvalue(uv) => {
+                            self.expr(&a.right, dst)?;
+                            self.emit(Op::SetUpvalue {
+                                upvalue: uv,
+                                src: dst,
+                            });
+                        }
                         Res::Global => {
                             self.expr(&a.right, dst)?;
                             self.store_name(name, dst)?;
                         }
-                        Res::Captured => return Self::captured_error(name),
                     }
                     return Ok(());
                 }
@@ -1292,12 +2222,20 @@ impl Compiler<'_> {
             }
             AssignmentTarget::StaticMemberExpression(me) => {
                 let obj = self.alloc()?;
-                self.expr(&me.object, obj)?;
+                if matches!(&me.object, Expression::Super(_)) {
+                    self.emit(Op::LoadThis { dst: obj });
+                } else {
+                    self.expr(&me.object, obj)?;
+                }
                 let name = self.str_const(me.property.name.as_str());
                 if plain {
                     self.expr(&a.right, dst)?;
                 } else {
-                    self.emit(Op::GetNamed { dst, obj, name });
+                    if matches!(&me.object, Expression::Super(_)) {
+                        self.emit(Op::GetSuperNamed { dst, name });
+                    } else {
+                        self.emit(Op::GetNamed { dst, obj, name });
+                    }
                     self.compound(op, dst, &a.right)?;
                 }
                 self.emit(Op::SetNamed {
@@ -1308,29 +2246,193 @@ impl Compiler<'_> {
             }
             AssignmentTarget::ComputedMemberExpression(me) => {
                 let obj = self.alloc()?;
-                self.expr(&me.object, obj)?;
+                if matches!(&me.object, Expression::Super(_)) {
+                    self.emit(Op::LoadThis { dst: obj });
+                } else {
+                    self.expr(&me.object, obj)?;
+                }
                 let key = self.alloc()?;
                 self.expr(&me.expression, key)?;
                 if plain {
                     self.expr(&a.right, dst)?;
                 } else {
-                    self.emit(Op::GetKeyed { dst, obj, key });
+                    if matches!(&me.object, Expression::Super(_)) {
+                        self.emit(Op::GetSuperKeyed { dst, key });
+                    } else {
+                        self.emit(Op::GetKeyed { dst, obj, key });
+                    }
                     self.compound(op, dst, &a.right)?;
                 }
                 self.emit(Op::SetKeyed { obj, key, src: dst });
             }
-            _ => return unsupported("atribuição com desestruturação"),
+            pat => {
+                if !plain {
+                    return unsupported("operador composto com desestruturação");
+                }
+                self.expr(&a.right, dst)?;
+                self.assign_target(pat, dst)?;
+            }
         }
         Ok(())
     }
 
-    /// `x op= y` com o valor atual de `x` já em `dst`; deixa o novo valor em `dst`.
-    /// Para `&&=`, `||=` e `??=` o lado direito só roda se precisar.
+    fn assign_target(&mut self, target: &'a AssignmentTarget<'a>, src: Reg) -> CResult<()> {
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(id) => {
+                self.store_name(id.name.as_str(), src)
+            }
+            AssignmentTarget::StaticMemberExpression(me) => {
+                let obj = self.alloc()?;
+                self.expr(&me.object, obj)?;
+                let name = self.str_const(me.property.name.as_str());
+                self.emit(Op::SetNamed { obj, name, src });
+                Ok(())
+            }
+            AssignmentTarget::ComputedMemberExpression(me) => {
+                let obj = self.alloc()?;
+                self.expr(&me.object, obj)?;
+                let key = self.alloc()?;
+                self.expr(&me.expression, key)?;
+                self.emit(Op::SetKeyed { obj, key, src });
+                Ok(())
+            }
+            AssignmentTarget::ArrayAssignmentTarget(at) => {
+                let iter = self.alloc()?;
+                self.emit(Op::ForOfInit { dst: iter, src });
+                for el in &at.elements {
+                    let m = self.mark();
+                    let val = self.alloc()?;
+                    let j = self.emit(Op::IterNext {
+                        iter,
+                        dst: val,
+                        done_target: 0,
+                    });
+                    self.patch_here(j);
+                    if let Some(sub) = el {
+                        self.assign_maybe_default(sub, val)?;
+                    }
+                    self.release(m);
+                }
+                if let Some(rest) = &at.rest {
+                    let m = self.mark();
+                    let rest_arr = self.alloc()?;
+                    self.emit(Op::IterRest {
+                        iter,
+                        dst: rest_arr,
+                    });
+                    self.assign_target(&rest.target, rest_arr)?;
+                    self.release(m);
+                }
+                Ok(())
+            }
+            AssignmentTarget::ObjectAssignmentTarget(ot) => {
+                self.emit(Op::CheckObjectNotNullish { src });
+                let has_rest = ot.rest.is_some();
+                let mut excl_regs = Vec::new();
+                for prop in &ot.properties {
+                    let m = self.mark();
+                    let val = self.alloc()?;
+                    match prop {
+                        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(pi) => {
+                            let name_str = pi.binding.name.as_str();
+                            let name = self.str_const(name_str);
+                            self.emit(Op::GetNamed {
+                                dst: val,
+                                obj: src,
+                                name,
+                            });
+                            if has_rest {
+                                let kr = self.alloc()?;
+                                self.emit(Op::LoadConst { dst: kr, idx: name });
+                                excl_regs.push(kr);
+                            }
+                            if let Some(init) = &pi.init {
+                                let skip = self.emit(Op::JumpIfNotUndefined {
+                                    cond: val,
+                                    target: 0,
+                                });
+                                self.expr(init, val)?;
+                                self.patch_here(skip);
+                            }
+                            self.store_name(name_str, val)?;
+                        }
+                        AssignmentTargetProperty::AssignmentTargetPropertyProperty(pp) => {
+                            if let Some(kr) = self.get_property_with_key(
+                                src,
+                                &pp.name,
+                                pp.computed,
+                                val,
+                                has_rest,
+                            )? {
+                                excl_regs.push(kr);
+                            }
+                            self.assign_maybe_default(&pp.binding, val)?;
+                        }
+                    }
+                    if !has_rest {
+                        self.release(m);
+                    }
+                }
+                if let Some(rest) = &ot.rest {
+                    let rest_obj = self.alloc()?;
+                    let excl_start = self.mark();
+                    let mut consecutive = Vec::with_capacity(excl_regs.len());
+                    for _ in &excl_regs {
+                        consecutive.push(self.alloc()?);
+                    }
+                    for (dst_k, src_k) in consecutive.into_iter().zip(excl_regs) {
+                        if dst_k != src_k {
+                            self.emit(Op::Move {
+                                dst: dst_k,
+                                src: src_k,
+                            });
+                        }
+                    }
+                    let excl_count = u16::try_from(ot.properties.len())
+                        .map_err(|_| JsError::Unsupported("chaves demais no rest".into()))?;
+                    self.emit(Op::ObjectRest {
+                        dst: rest_obj,
+                        obj: src,
+                        excl_start,
+                        excl_count,
+                    });
+                    self.assign_target(&rest.target, rest_obj)?;
+                }
+                Ok(())
+            }
+            _ => unsupported("alvo de atribuição não suportado"),
+        }
+    }
+
+    fn assign_maybe_default(
+        &mut self,
+        target: &'a AssignmentTargetMaybeDefault<'a>,
+        src: Reg,
+    ) -> CResult<()> {
+        match target {
+            AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(awd) => {
+                let tmp = self.alloc()?;
+                self.emit(Op::Move { dst: tmp, src });
+                let skip = self.emit(Op::JumpIfNotUndefined {
+                    cond: tmp,
+                    target: 0,
+                });
+                self.expr(&awd.init, tmp)?;
+                self.patch_here(skip);
+                self.assign_target(&awd.binding, tmp)
+            }
+            _ => {
+                let at = target.to_assignment_target();
+                self.assign_target(at, src)
+            }
+        }
+    }
+
     fn compound(
         &mut self,
         op: AssignmentOperator,
         dst: Reg,
-        right: &Expression<'_>,
+        right: &'a Expression<'a>,
     ) -> CResult<()> {
         if let Some(lop) = op.to_logical_operator() {
             let j = self.logical_jump(lop, dst);
@@ -1353,64 +2455,125 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    fn call(&mut self, c: &CallExpression<'_>, dst: Reg) -> CResult<()> {
+    fn call(&mut self, c: &'a CallExpression<'a>, dst: Reg) -> CResult<()> {
         if c.optional {
-            return unsupported("chamada opcional (?.())");
+            return unsupported("chamada opcional sem ChainExpression");
+        }
+        if matches!(&c.callee, Expression::Super(_)) {
+            if has_spread(&c.arguments) {
+                let args_array = self.arguments_array(&c.arguments)?;
+                self.emit(Op::SuperCallSpread { dst, args_array });
+            } else {
+                let (args, argc) = self.arguments(&c.arguments)?;
+                self.emit(Op::SuperCall { dst, args, argc });
+            }
+            self.emit(Op::FinishSuper { src: dst });
+            self.emit_pending_fields_for_current_fn()?;
+            return Ok(());
         }
         let callee = self.alloc()?;
         let this = self.alloc()?;
         match &c.callee {
             Expression::StaticMemberExpression(me) if !me.optional => {
-                self.expr(&me.object, this)?;
                 let name = self.str_const(me.property.name.as_str());
-                self.emit(Op::GetNamed {
-                    dst: callee,
-                    obj: this,
-                    name,
-                });
+                if matches!(&me.object, Expression::Super(_)) {
+                    self.emit(Op::LoadThis { dst: this });
+                    self.emit(Op::GetSuperNamed { dst: callee, name });
+                } else {
+                    self.expr(&me.object, this)?;
+                    self.emit(Op::GetNamed {
+                        dst: callee,
+                        obj: this,
+                        name,
+                    });
+                }
             }
             Expression::ComputedMemberExpression(me) if !me.optional => {
-                self.expr(&me.object, this)?;
-                let m = self.mark();
-                let key = self.expr_any(&me.expression)?;
-                self.emit(Op::GetKeyed {
-                    dst: callee,
-                    obj: this,
-                    key,
-                });
-                self.release(m);
+                if matches!(&me.object, Expression::Super(_)) {
+                    self.emit(Op::LoadThis { dst: this });
+                    let m = self.mark();
+                    let key = self.expr_any(&me.expression)?;
+                    self.emit(Op::GetSuperKeyed { dst: callee, key });
+                    self.release(m);
+                } else {
+                    self.expr(&me.object, this)?;
+                    let m = self.mark();
+                    let key = self.expr_any(&me.expression)?;
+                    self.emit(Op::GetKeyed {
+                        dst: callee,
+                        obj: this,
+                        key,
+                    });
+                    self.release(m);
+                }
             }
             other => {
                 self.expr(other, callee)?;
                 self.emit(Op::LoadUndefined { dst: this });
             }
         }
-        let (args, argc) = self.arguments(&c.arguments)?;
-        self.emit(Op::Call {
-            dst,
-            callee,
-            this,
-            args,
-            argc,
-        });
+        if has_spread(&c.arguments) {
+            let args_array = self.arguments_array(&c.arguments)?;
+            self.emit(Op::CallSpread {
+                dst,
+                callee,
+                this,
+                args_array,
+            });
+        } else {
+            let (args, argc) = self.arguments(&c.arguments)?;
+            self.emit(Op::Call {
+                dst,
+                callee,
+                this,
+                args,
+                argc,
+            });
+        }
         Ok(())
     }
 
-    /// Avalia os argumentos em registradores consecutivos; devolve (primeiro, quantos).
-    fn arguments(&mut self, list: &[Argument<'_>]) -> CResult<(Reg, u16)> {
+    fn arguments(&mut self, list: &'a [Argument<'a>]) -> CResult<(Reg, u16)> {
         let start = self.mark();
         let mut regs = Vec::with_capacity(list.len());
         for _ in list {
             regs.push(self.alloc()?);
         }
         for (a, r) in list.iter().zip(regs) {
-            let Some(e) = a.as_expression() else {
-                return unsupported("spread em argumentos (...x)");
-            };
+            let e = a.as_expression().expect("argumento sem spread");
             self.expr(e, r)?;
         }
         let argc = u16::try_from(list.len())
             .map_err(|_| JsError::Unsupported("argumentos demais".into()))?;
         Ok((start, argc))
     }
+
+    fn arguments_array(&mut self, list: &'a [Argument<'a>]) -> CResult<Reg> {
+        let arr = self.alloc()?;
+        self.emit(Op::NewArray { dst: arr });
+        for a in list {
+            let m = self.mark();
+            match a {
+                Argument::SpreadElement(sp) => {
+                    let r = self.expr_any(&sp.argument)?;
+                    self.emit(Op::ArrayPushSpread {
+                        array: arr,
+                        iterable: r,
+                    });
+                }
+                other => {
+                    let e = other.as_expression().expect("argumento é expressão");
+                    let r = self.expr_any(e)?;
+                    self.emit(Op::ArrayPush { array: arr, src: r });
+                }
+            }
+            self.release(m);
+        }
+        Ok(arr)
+    }
+}
+
+fn has_spread(list: &[Argument<'_>]) -> bool {
+    list.iter()
+        .any(|a| matches!(a, Argument::SpreadElement(_)))
 }
