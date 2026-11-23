@@ -743,11 +743,14 @@ impl Ui {
         let tw = (tabs_avail / tab_count.max(1) as f64).clamp(TAB_MIN_W * s, TAB_MAX_W * s);
         geom.tab_axis_origin = left_x;
         geom.tab_axis_step = tw;
-        let (top_pad, bot_pad) = self.horizontal_tab_pads(s);
+        let (top_pad, bot_pad) = self.horizontal_tab_pads(s, bar.height());
+        let tab_y0 = bar.y0 + top_pad;
+        let tab_y1 = (bar.y1 - bot_pad).max(tab_y0);
         for i in 0..tab_count {
             let x0 = left_x + i as f64 * tw;
-            let r = Rect::new(x0, bar.y0 + top_pad, (x0 + tw).min(right_x), bar.y1 - bot_pad);
-            geom.tab_closes.push(Some((Point::new(r.x1 - 16.0 * s, r.center().y), 9.0 * s)));
+            let x1 = (x0 + tw).min(right_x).max(x0);
+            let r = Rect::new(x0, tab_y0, x1, tab_y1);
+            geom.tab_closes.push(Some((Point::new((r.x1 - 16.0 * s).max(r.x0), r.center().y), 9.0 * s)));
             geom.tabs.push(r);
         }
         let nt_x = (left_x + tab_count as f64 * tw + 6.0 * s).min(right_x - 30.0 * s);
@@ -770,10 +773,12 @@ impl Ui {
         let tw = (avail / tab_count.max(1) as f64).clamp(TAB_MIN_W * s, TAB_MAX_W * s);
         geom.tab_axis_origin = x0;
         geom.tab_axis_step = tw;
-        let (top_pad, bot_pad) = self.horizontal_tab_pads(s);
+        let (top_pad, bot_pad) = self.horizontal_tab_pads(s, ts.height());
+        let tab_y0 = ts.y0 + top_pad;
+        let tab_y1 = (ts.y1 - bot_pad).max(tab_y0);
         for i in 0..tab_count {
             let tx0 = x0 + i as f64 * tw;
-            let r = Rect::new(tx0, ts.y0 + top_pad, tx0 + tw, ts.y1 - bot_pad);
+            let r = Rect::new(tx0, tab_y0, tx0 + tw, tab_y1);
             geom.tab_closes.push(Some((Point::new(r.x1 - 18.0 * s, r.center().y), 9.0 * s)));
             geom.tabs.push(r);
         }
@@ -831,11 +836,12 @@ impl Ui {
         }
     }
 
-    fn horizontal_tab_pads(&self, s: f64) -> (f64, f64) {
+    fn horizontal_tab_pads(&self, s: f64, band_h: f64) -> (f64, f64) {
+        let pad = (6.0 * s).min(band_h.max(0.0));
         if self.config.tab_position == TabPosition::Bottom {
-            (0.0, 6.0 * s)
+            (0.0, pad)
         } else {
-            (6.0 * s, 0.0)
+            (pad, 0.0)
         }
     }
 
@@ -884,27 +890,35 @@ impl Ui {
     fn menu_rect(&self, geom: &LayoutGeom, count: usize) -> Rect {
         let s = self.scale();
         let (w, h) = (self.size.0.max(0.0), self.size.1.max(0.0));
-        let menu_w = (MENU_W * s).min((w - 16.0).max(160.0));
+        let margin = (8.0 * s).min(w * 0.5);
+        let menu_w = (MENU_W * s).min((w - 2.0 * margin).max(0.0));
         let menu_h = 8.0 * s + count as f64 * MENU_ITEM_H * s;
+        let min_x1 = margin + menu_w;
+        let max_x1 = (w - margin).max(min_x1);
         let menu_btn = geom
             .tool_buttons
             .iter()
             .find(|(hit, _)| *hit == Hit::Menu)
             .map(|(_, r)| *r);
+        let top_pad = (4.0 * s).min(h * 0.5);
         if let Some(btn) = menu_btn {
-            let x1 = btn.x1.clamp(menu_w + 8.0 * s, (w - 8.0 * s).max(menu_w));
-            let x0 = (x1 - menu_w).max(8.0 * s);
+            let x1 = btn.x1.clamp(min_x1, max_x1);
+            let x0 = (x1 - menu_w).max(0.0);
             if btn.center().y > h * 0.5 {
-                let y1 = (btn.y0 - 4.0 * s).max(menu_h);
-                Rect::new(x0, (y1 - menu_h).max(4.0 * s), x1, y1)
+                let y1 = (btn.y0 - top_pad).clamp(top_pad, h.max(top_pad));
+                let y0 = (y1 - menu_h).max(top_pad).min(y1);
+                Rect::new(x0, y0, x1, y1)
             } else {
-                let y0 = (btn.y1 + 4.0 * s).min((h - menu_h).max(0.0));
-                Rect::new(x0, y0, x1, y0 + menu_h)
+                let y0 = (btn.y1 + top_pad).clamp(top_pad, (h - menu_h).max(top_pad));
+                let y1 = (y0 + menu_h).min(h.max(y0));
+                Rect::new(x0, y0, x1, y1)
             }
         } else {
-            let x1 = (w - 12.0 * s).max(menu_w);
-            let y0 = 40.0 * s;
-            Rect::new(x1 - menu_w, y0, x1, y0 + menu_h)
+            let x1 = max_x1;
+            let x0 = (x1 - menu_w).max(0.0);
+            let y0 = (40.0 * s).min((h - menu_h).max(0.0));
+            let y1 = (y0 + menu_h).min(h.max(y0));
+            Rect::new(x0, y0, x1, y1)
         }
     }
 
@@ -1314,6 +1328,9 @@ impl Ui {
         t: Affine,
     ) {
         let Some(ts) = geom.tabstrip else { return };
+        if ts.width() <= 0.0 || ts.height() <= 0.0 {
+            return;
+        }
         Self::fill(scene, t, ctx.th.frame, &ts);
         if geom.tabs_vertical {
             let sep_x = if self.config.tab_position == TabPosition::Left {
@@ -1343,6 +1360,9 @@ impl Ui {
 
     fn paint_toolbar_bg(&self, scene: &mut Scene, geom: &LayoutGeom, ctx: &PaintCtx, t: Affine) {
         let Some(tb) = geom.toolbar else { return };
+        if tb.width() <= 0.0 || tb.height() <= 0.0 {
+            return;
+        }
         if !geom.unified {
             Self::fill(scene, t, ctx.th.surface, &tb);
         }
@@ -1375,7 +1395,8 @@ impl Ui {
                 let pill_r = ctx.rad.min(r.height() * 0.5);
                 if active {
                     Self::fill(scene, t, ctx.th.surface, &RoundedRect::from_rect(r, pill_r));
-                    let bar = Rect::new(r.x0 + 1.5 * ctx.s, r.y0 + 5.0 * ctx.s, r.x0 + 4.5 * ctx.s, r.y1 - 5.0 * ctx.s);
+                    let bar_y0 = r.y0 + 5.0 * ctx.s;
+                    let bar = Rect::new(r.x0 + 1.5 * ctx.s, bar_y0, r.x0 + 4.5 * ctx.s, (r.y1 - 5.0 * ctx.s).max(bar_y0));
                     Self::fill(scene, t, ctx.th.accent, &RoundedRect::from_rect(bar, 1.5 * ctx.s));
                 } else if hovered {
                     Self::fill(scene, t, ctx.th.hover, &RoundedRect::from_rect(r, pill_r));
@@ -1404,7 +1425,12 @@ impl Ui {
                     };
                     Self::fill(scene, t, ctx.th.surface, &RoundedRect::from_rect(r, radii));
                 } else if hovered {
-                    let hr = Rect::new(r.x0 + 2.0 * ctx.s, r.y0 + 2.0 * ctx.s, r.x1 - 2.0 * ctx.s, r.y1 - 4.0 * ctx.s);
+                    let hr = Rect::new(
+                        r.x0 + 2.0 * ctx.s,
+                        r.y0 + 2.0 * ctx.s,
+                        (r.x1 - 2.0 * ctx.s).max(r.x0 + 2.0 * ctx.s),
+                        (r.y1 - 4.0 * ctx.s).max(r.y0 + 2.0 * ctx.s),
+                    );
                     Self::fill(scene, t, ctx.th.hover, &RoundedRect::from_rect(hr, (ctx.rad * 0.9).min(12.0 * ctx.s)));
                 } else if i + 1 < n
                     && i + 1 != m.active
@@ -1709,6 +1735,9 @@ impl Ui {
     ) {
         let items = self.menu_items(m);
         let r = self.menu_rect(geom, items.len());
+        if r.width() <= 8.0 * ctx.s || r.height() <= 8.0 * ctx.s {
+            return;
+        }
         let panel_r = ctx.rad.max(6.0 * ctx.s).min(14.0 * ctx.s);
         let shadow = RoundedRect::from_rect(r.inflate(2.0, 2.0) + Vec2::new(0.0, 3.0), panel_r + 2.0);
         Self::fill(scene, t, [0, 0, 0, if ctx.th.dark { 120 } else { 40 }], &shadow);
@@ -1717,6 +1746,7 @@ impl Ui {
         Self::stroke(scene, t, ctx.th.separator, 1.0, &panel);
         let item_h = MENU_ITEM_H * ctx.s;
         let row_r = (ctx.rad * 0.65).min(8.0 * ctx.s);
+        scene.push_clip_layer(Fill::NonZero, t, &r);
         for (i, (label, _)) in items.iter().enumerate() {
             let y0 = r.y0 + 4.0 * ctx.s + i as f64 * item_h;
             let row = Rect::new(r.x0 + 4.0 * ctx.s, y0, r.x1 - 4.0 * ctx.s, y0 + item_h);
@@ -1727,6 +1757,7 @@ impl Ui {
             let ty = row.center().y - layout.height() as f64 / 2.0;
             draw_text(scene, &layout, t * Affine::translate((row.x0 + 12.0 * ctx.s, ty)), None);
         }
+        scene.pop_layer();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2082,6 +2113,37 @@ mod tests {
                     let mut ui = Ui::with_config(cfg);
                     ui.set_size(1024.0, 720.0);
                     ui.set_telemetry(Some(64.0), 0);
+                    scene.reset();
+                    ui.paint(&mut scene, &mut le, &m, Affine::IDENTITY);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn menu_and_paint_narrow_and_zero_size_no_panic() {
+        let tabs = sample_tabs();
+        let m = model(&tabs, false);
+        let mut le = LayoutEngine::new();
+        let mut scene = Scene::new();
+
+        for (w, h) in [(520.0, 320.0), (100.0, 80.0), (0.0, 0.0)] {
+            for tb_pos in ToolbarPosition::ALL {
+                for tab_pos in TabPosition::ALL {
+                    let mut cfg = NousConfig::default();
+                    cfg.tab_position = tab_pos;
+                    cfg.toolbar_position = tb_pos;
+                    cfg.ui_scale = 2.0;
+                    let mut ui = Ui::with_config(cfg);
+                    ui.set_size(w, h);
+                    ui.menu_open = true;
+
+                    let geom = ui.layout(tabs.len());
+                    let mr = ui.menu_rect(&geom, ui.menu_items(&m).len());
+                    assert!(mr.x0 <= mr.x1 && mr.y0 <= mr.y1);
+                    let _ = ui.hit_test(&m, mr.center().x, mr.center().y);
+                    let _ = ui.hit_test(&m, w * 0.5, h * 0.5);
+
                     scene.reset();
                     ui.paint(&mut scene, &mut le, &m, Affine::IDENTITY);
                 }
