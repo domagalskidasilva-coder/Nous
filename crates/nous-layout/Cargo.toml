@@ -10,3 +10,4 @@ publish.workspace = true
 nous-dom.workspace = true
 nous-style.workspace = true
 parley.workspace = true
+taffy = "0.15"

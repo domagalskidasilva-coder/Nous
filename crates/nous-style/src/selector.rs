@@ -26,10 +26,18 @@ pub enum Pseudo {
     FirstChild,
     LastChild,
     OnlyChild,
+    FirstOfType,
+    LastOfType,
+    NthChild(i32, i32),
     Root,
     Link,
     Empty,
+    Checked,
+    Disabled,
     Not(Box<Compound>),
+    NotList(Vec<Selector>),
+    Is(Vec<Selector>),
+    Where(Vec<Selector>),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -82,6 +90,13 @@ fn compound_specificity(comp: &Compound, a: &mut u32, b: &mut u32, c: &mut u32) 
     for p in &comp.pseudos {
         match p {
             Pseudo::Not(inner) => compound_specificity(inner, a, b, c),
+            Pseudo::NotList(sels) | Pseudo::Is(sels) => {
+                let best = sels.iter().map(Selector::specificity).max().unwrap_or(0);
+                *a += (best >> 16) & 0xff;
+                *b += (best >> 8) & 0xff;
+                *c += best & 0xff;
+            }
+            Pseudo::Where(_) => {}
             _ => *b += 1,
         }
     }
@@ -164,16 +179,25 @@ fn parse_selector(input: &str) -> Option<Selector> {
         } else if pending.is_some() {
             return None;
         }
-        // lê o compound até espaço ou combinador (fora de colchetes/parênteses)
+        // lê o compound até espaço ou combinador (fora de colchetes/parênteses/aspas)
         let start = i;
         let mut end = input.len();
-        let mut depth = 0;
+        let mut depth = 0i32;
+        let mut quote: Option<char> = None;
         while let Some(&(j, c)) = chars.peek() {
+            if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+                chars.next();
+                continue;
+            }
             if depth == 0 && (c.is_whitespace() || matches!(c, '>' | '+' | '~')) {
                 end = j;
                 break;
             }
             match c {
+                '"' | '\'' => quote = Some(c),
                 '(' | '[' => depth += 1,
                 ')' | ']' => depth -= 1,
                 _ => {}
@@ -237,7 +261,7 @@ fn parse_compound(input: &str) -> Option<Compound> {
                 rest = r;
             }
             '[' => {
-                let close = rest.find(']')?;
+                let close = find_closing_bracket(rest)?;
                 comp.attrs.push(parse_attr(&rest[..close])?);
                 rest = &rest[close + 1..];
             }
@@ -262,13 +286,37 @@ fn parse_compound(input: &str) -> Option<Compound> {
                     ("first-child", None) => comp.pseudos.push(Pseudo::FirstChild),
                     ("last-child", None) => comp.pseudos.push(Pseudo::LastChild),
                     ("only-child", None) => comp.pseudos.push(Pseudo::OnlyChild),
+                    ("first-of-type", None) => comp.pseudos.push(Pseudo::FirstOfType),
+                    ("last-of-type", None) => comp.pseudos.push(Pseudo::LastOfType),
+                    ("nth-child", Some(arg)) => match parse_nth(arg) {
+                        Some((a, b)) => comp.pseudos.push(Pseudo::NthChild(a, b)),
+                        None => comp.never = true,
+                    },
                     ("root", None) => comp.pseudos.push(Pseudo::Root),
                     ("link" | "any-link", None) => comp.pseudos.push(Pseudo::Link),
                     ("empty", None) => comp.pseudos.push(Pseudo::Empty),
+                    ("checked", None) => comp.pseudos.push(Pseudo::Checked),
+                    ("disabled", None) => comp.pseudos.push(Pseudo::Disabled),
                     // :visited nunca casa (privacidade, como nos navegadores modernos)
                     ("visited", None) => comp.never = true,
-                    ("not", Some(arg)) => match parse_compound(arg.trim()) {
-                        Some(inner) => comp.pseudos.push(Pseudo::Not(Box::new(inner))),
+                    ("not", Some(arg)) => {
+                        let trimmed = arg.trim();
+                        if !trimmed.contains([',', ' ', '>', '+', '~'])
+                            && let Some(inner) = parse_compound(trimmed)
+                        {
+                            comp.pseudos.push(Pseudo::Not(Box::new(inner)));
+                        } else if let Some(list) = parse_selector_list(trimmed) {
+                            comp.pseudos.push(Pseudo::NotList(list));
+                        } else {
+                            comp.never = true;
+                        }
+                    }
+                    ("is", Some(arg)) => match parse_selector_list(arg.trim()) {
+                        Some(list) => comp.pseudos.push(Pseudo::Is(list)),
+                        None => comp.never = true,
+                    },
+                    ("where", Some(arg)) => match parse_selector_list(arg.trim()) {
+                        Some(list) => comp.pseudos.push(Pseudo::Where(list)),
                         None => comp.never = true,
                     },
                     // estados dinâmicos (:hover, :focus…) e o resto: ainda não
@@ -281,13 +329,60 @@ fn parse_compound(input: &str) -> Option<Compound> {
     Some(comp)
 }
 
+fn find_closing_bracket(s: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    for (i, c) in s.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, ']') => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_nth(raw: &str) -> Option<(i32, i32)> {
+    let s: String = raw
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if s == "odd" {
+        return Some((2, 1));
+    }
+    if s == "even" {
+        return Some((2, 0));
+    }
+    if let Some((a_part, b_part)) = s.split_once('n') {
+        let a = match a_part {
+            "" | "+" => 1,
+            "-" => -1,
+            _ => a_part.parse::<i32>().ok()?,
+        };
+        let b = if b_part.is_empty() {
+            0
+        } else {
+            b_part.parse::<i32>().ok()?
+        };
+        Some((a, b))
+    } else {
+        Some((0, s.parse::<i32>().ok()?))
+    }
+}
+
 fn matching_paren(s: &str) -> Option<usize> {
     let mut depth = 0;
+    let mut quote: Option<char> = None;
     for (i, c) in s.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' if depth == 0 => return Some(i),
-            ')' => depth -= 1,
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '(') => depth += 1,
+            (None, ')') if depth == 0 => return Some(i),
+            (None, ')') => depth -= 1,
             _ => {}
         }
     }
@@ -296,15 +391,28 @@ fn matching_paren(s: &str) -> Option<usize> {
 
 fn parse_attr(inner: &str) -> Option<AttrSel> {
     let inner = inner.trim();
+    let (name_raw, rest_after_name) = read_ident(inner);
+    if name_raw.is_empty() {
+        return None;
+    }
+    let name = LocalName::from(name_raw.to_ascii_lowercase());
+    let rest = rest_after_name.trim_start();
+    if rest.is_empty() {
+        return Some(AttrSel {
+            name,
+            op: AttrOp::Exists,
+        });
+    }
     let ops = ["~=", "|=", "^=", "$=", "*=", "="];
     for op in ops {
-        if let Some(pos) = inner.find(op) {
-            let name = inner[..pos].trim().to_ascii_lowercase();
-            let mut value = inner[pos + op.len()..].trim();
-            // ignora o flag " i" (case-insensitive) no fim
+        if let Some(after_op) = rest.strip_prefix(op) {
+            let mut value = after_op.trim();
+            // ignora o flag " i" / " s" (case-insensitive/sensitive) no fim
             if let Some(v) = value
                 .strip_suffix(" i")
+                .or_else(|| value.strip_suffix(" I"))
                 .or_else(|| value.strip_suffix(" s"))
+                .or_else(|| value.strip_suffix(" S"))
             {
                 value = v.trim();
             }
@@ -317,20 +425,10 @@ fn parse_attr(inner: &str) -> Option<AttrSel> {
                 "*=" => AttrOp::Substring(value),
                 _ => AttrOp::Equals(value),
             };
-            return Some(AttrSel {
-                name: LocalName::from(name),
-                op,
-            });
+            return Some(AttrSel { name, op });
         }
     }
-    let (name, rest) = read_ident(inner);
-    if name.is_empty() || !rest.trim().is_empty() {
-        return None;
-    }
-    Some(AttrSel {
-        name: LocalName::from(name.to_ascii_lowercase()),
-        op: AttrOp::Exists,
-    })
+    None
 }
 
 // ---------------------------------------------------------------- casamento
@@ -406,10 +504,52 @@ pub fn matches_compound(doc: &Document, node: NodeId, comp: &Compound) -> bool {
             Pseudo::OnlyChild => {
                 prev_element(doc, node).is_none() && next_element(doc, node).is_none()
             }
+            Pseudo::FirstOfType => {
+                let mut cur = prev_element(doc, node);
+                let mut found = false;
+                while let Some(sib) = cur {
+                    if doc.element(sib).is_some_and(|e| e.local_name() == el.local_name()) {
+                        found = true;
+                        break;
+                    }
+                    cur = prev_element(doc, sib);
+                }
+                !found
+            }
+            Pseudo::LastOfType => {
+                let mut cur = next_element(doc, node);
+                let mut found = false;
+                while let Some(sib) = cur {
+                    if doc.element(sib).is_some_and(|e| e.local_name() == el.local_name()) {
+                        found = true;
+                        break;
+                    }
+                    cur = next_element(doc, sib);
+                }
+                !found
+            }
+            Pseudo::NthChild(a, b) => {
+                let mut idx = 1i32;
+                let mut cur = prev_element(doc, node);
+                while let Some(sib) = cur {
+                    idx += 1;
+                    cur = prev_element(doc, sib);
+                }
+                let diff = idx - *b;
+                if *a == 0 {
+                    diff == 0
+                } else {
+                    diff % *a == 0 && (diff / *a) >= 0
+                }
+            }
             Pseudo::Root => parent_element(doc, node).is_none(),
             Pseudo::Link => matches!(&*el.name.local, "a" | "area") && el.attr("href").is_some(),
             Pseudo::Empty => doc.node(node).first_child.is_none(),
+            Pseudo::Checked => el.attr("checked").is_some(),
+            Pseudo::Disabled => el.attr("disabled").is_some(),
             Pseudo::Not(inner) => !matches_compound(doc, node, inner),
+            Pseudo::NotList(sels) => !sels.iter().any(|s| matches(doc, node, s)),
+            Pseudo::Is(sels) | Pseudo::Where(sels) => sels.iter().any(|s| matches(doc, node, s)),
         };
         if !ok {
             return false;
@@ -473,5 +613,50 @@ mod tests {
         assert_eq!(s[1].specificity(), (1 << 16) | (1 << 8) | 1);
         assert!(parse_selector_list("a:hover").unwrap()[0].compounds[0].never);
         assert!(parse_selector_list("> a").is_none());
+    }
+
+    #[test]
+    fn atributos_combinadores_e_pseudoclasses() {
+        use nous_dom::{Attribute, ElementData, NodeData, QualName, ns};
+
+        fn el(doc: &mut Document, parent: NodeId, tag: &str, attrs: &[(&str, &str)]) -> NodeId {
+            let id = doc.create(NodeData::Element(ElementData {
+                name: QualName::new(None, ns!(html), LocalName::from(tag)),
+                attrs: attrs
+                    .iter()
+                    .map(|(k, v)| Attribute {
+                        name: QualName::new(None, ns!(), LocalName::from(*k)),
+                        value: (*v).into(),
+                    })
+                    .collect(),
+                template_contents: None,
+            }));
+            doc.append(parent, id);
+            id
+        }
+
+        let mut doc = Document::new();
+        let ul = el(&mut doc, NodeId::DOCUMENT, "ul", &[("data-url", "x~=y")]);
+        let li1 = el(&mut doc, ul, "li", &[("class", "a"), ("data-k", "v1")]);
+        let li2 = el(&mut doc, ul, "li", &[("class", "b"), ("data-k", "v2")]);
+        let li3 = el(&mut doc, ul, "li", &[("class", "c")]);
+
+        let match_sel = |node: NodeId, s: &str| -> bool {
+            let list = parse_selector_list(s).unwrap();
+            list.iter().any(|sel| matches(&doc, node, sel))
+        };
+
+        assert!(match_sel(ul, r#"[data-url="x~=y"]"#));
+        assert!(match_sel(li1, "ul > li:first-child"));
+        assert!(!match_sel(li2, "ul > li:first-child"));
+        assert!(match_sel(li3, "ul > li:last-child"));
+        assert!(match_sel(li2, "li.a + li"));
+        assert!(!match_sel(li3, "li.a + li"));
+        assert!(match_sel(li3, "li.a ~ li"));
+        assert!(match_sel(li2, "li:not(.a, .c)"));
+        assert!(!match_sel(li1, "li:not(.a, .c)"));
+        assert!(match_sel(li2, "li[data-k]"));
+        assert!(match_sel(li2, "li[data-k='v2']"));
+        assert!(!match_sel(li3, "li[data-k]"));
     }
 }

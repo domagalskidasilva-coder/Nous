@@ -58,7 +58,107 @@ pub enum Display {
     Inline,
     InlineBlock,
     ListItem,
+    Flex,
+    InlineFlex,
+    Grid,
+    Table,
+    TableRow,
+    TableCell,
     None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlexDirection {
+    Row,
+    RowReverse,
+    Column,
+    ColumnReverse,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlexWrap {
+    NoWrap,
+    Wrap,
+    WrapReverse,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JustifyContent {
+    FlexStart,
+    FlexEnd,
+    Center,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+    Stretch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlignItems {
+    Stretch,
+    FlexStart,
+    FlexEnd,
+    Center,
+    Baseline,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlignSelf {
+    Auto,
+    Stretch,
+    FlexStart,
+    FlexEnd,
+    Center,
+    Baseline,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TrackBound {
+    Px(f32),
+    Percent(f32),
+    Fr(f32),
+    Auto,
+    MinContent,
+    MaxContent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TrackSize {
+    Px(f32),
+    Percent(f32),
+    Fr(f32),
+    Auto,
+    MinContent,
+    MaxContent,
+    MinMax(TrackBound, TrackBound),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct GridPlacement {
+    pub start: Option<i16>,
+    pub span: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoxSizing {
+    ContentBox,
+    BorderBox,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Overflow {
+    Visible,
+    Hidden,
+    Scroll,
+    Auto,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Position {
+    Static,
+    Relative,
+    Absolute,
+    Fixed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,10 +257,35 @@ pub struct ComputedStyle {
     pub border_width: [f32; 4],
     pub border_color: [Rgba; 4],
     pub border_radius: f32,
+    pub border_radius_length: Length,
     pub width: Length,
     pub height: Length,
+    pub min_width: Length,
     pub min_height: Length,
     pub max_width: Length,
+    pub max_height: Length,
+    pub box_sizing: BoxSizing,
+    pub overflow_x: Overflow,
+    pub overflow_y: Overflow,
+    pub opacity: f32,
+    pub position: Position,
+    /// Ordem: topo, direita, baixo, esquerda (como no CSS).
+    pub inset: [Length; 4],
+    pub z_index: Option<i32>,
+    pub flex_direction: FlexDirection,
+    pub flex_wrap: FlexWrap,
+    pub justify_content: JustifyContent,
+    pub align_items: AlignItems,
+    pub align_self: AlignSelf,
+    pub flex_grow: f32,
+    pub flex_shrink: f32,
+    pub flex_basis: Length,
+    pub row_gap: Length,
+    pub column_gap: Length,
+    pub grid_template_columns: Arc<[TrackSize]>,
+    pub grid_template_rows: Arc<[TrackSize]>,
+    pub grid_column: GridPlacement,
+    pub grid_row: GridPlacement,
     pub list_style: ListStyle,
     pub visible: bool,
 }
@@ -186,10 +311,34 @@ impl ComputedStyle {
             border_width: [0.0; 4],
             border_color: [Rgba::BLACK; 4],
             border_radius: 0.0,
+            border_radius_length: Length::Px(0.0),
             width: Length::Auto,
             height: Length::Auto,
+            min_width: Length::Auto,
             min_height: Length::Auto,
             max_width: Length::Auto,
+            max_height: Length::Auto,
+            box_sizing: BoxSizing::ContentBox,
+            overflow_x: Overflow::Visible,
+            overflow_y: Overflow::Visible,
+            opacity: 1.0,
+            position: Position::Static,
+            inset: [Length::Auto; 4],
+            z_index: None,
+            flex_direction: FlexDirection::Row,
+            flex_wrap: FlexWrap::NoWrap,
+            justify_content: JustifyContent::FlexStart,
+            align_items: AlignItems::Stretch,
+            align_self: AlignSelf::Auto,
+            flex_grow: 0.0,
+            flex_shrink: 1.0,
+            flex_basis: Length::Auto,
+            row_gap: Length::Px(0.0),
+            column_gap: Length::Px(0.0),
+            grid_template_columns: Arc::from([]),
+            grid_template_rows: Arc::from([]),
+            grid_column: GridPlacement::default(),
+            grid_row: GridPlacement::default(),
             list_style: ListStyle::Disc,
             visible: true,
         }
@@ -223,6 +372,55 @@ impl ComputedStyle {
     }
 
     pub fn is_block_level(&self) -> bool {
-        matches!(self.display, Display::Block | Display::ListItem)
+        matches!(
+            self.display,
+            Display::Block
+                | Display::ListItem
+                | Display::Flex
+                | Display::Grid
+                | Display::Table
+                | Display::TableRow
+                | Display::TableCell
+        )
+    }
+
+    /// Verdadeiro quando todas as propriedades não herdáveis já estão no valor inicial,
+    /// permitindo compartilhar `Arc<ComputedStyle>` do pai com segurança.
+    pub fn has_initial_non_inherited(&self) -> bool {
+        self.display == Display::Inline
+            && self.background_color == Rgba::TRANSPARENT
+            && self.margin == [Length::Px(0.0); 4]
+            && self.padding == [Length::Px(0.0); 4]
+            && self.border_width == [0.0; 4]
+            && self.border_color == [Rgba::BLACK; 4]
+            && self.border_radius == 0.0
+            && self.border_radius_length == Length::Px(0.0)
+            && self.width == Length::Auto
+            && self.height == Length::Auto
+            && self.min_width == Length::Auto
+            && self.min_height == Length::Auto
+            && self.max_width == Length::Auto
+            && self.max_height == Length::Auto
+            && self.box_sizing == BoxSizing::ContentBox
+            && self.overflow_x == Overflow::Visible
+            && self.overflow_y == Overflow::Visible
+            && self.opacity == 1.0
+            && self.position == Position::Static
+            && self.inset == [Length::Auto; 4]
+            && self.z_index.is_none()
+            && self.flex_direction == FlexDirection::Row
+            && self.flex_wrap == FlexWrap::NoWrap
+            && self.justify_content == JustifyContent::FlexStart
+            && self.align_items == AlignItems::Stretch
+            && self.align_self == AlignSelf::Auto
+            && self.flex_grow == 0.0
+            && self.flex_shrink == 1.0
+            && self.flex_basis == Length::Auto
+            && self.row_gap == Length::Px(0.0)
+            && self.column_gap == Length::Px(0.0)
+            && self.grid_template_columns.is_empty()
+            && self.grid_template_rows.is_empty()
+            && self.grid_column == GridPlacement::default()
+            && self.grid_row == GridPlacement::default()
     }
 }

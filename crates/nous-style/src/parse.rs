@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use crate::color::parse_color;
 use crate::selector::{Selector, parse_selector_list};
-use crate::values::{Display, FontFamily, GenericFamily, ListStyle, Rgba, TextAlign, WhiteSpace};
+use crate::values::{
+    AlignItems, AlignSelf, BoxSizing, Display, FlexDirection, FlexWrap, FontFamily, GenericFamily,
+    GridPlacement, JustifyContent, ListStyle, Overflow, Position, Rgba, TextAlign, WhiteSpace,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SpecLength {
@@ -15,6 +18,23 @@ pub enum SpecLength {
     Vw(f32),
     Vh(f32),
     Auto,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpecTrackBound {
+    Length(SpecLength),
+    Fr(f32),
+    MinContent,
+    MaxContent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpecTrackSize {
+    Length(SpecLength),
+    Fr(f32),
+    MinContent,
+    MaxContent,
+    MinMax(SpecTrackBound, SpecTrackBound),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,10 +89,35 @@ pub enum Decl {
     BorderRadius(SpecLength),
     Width(SpecLength),
     Height(SpecLength),
+    MinWidth(SpecLength),
     MinHeight(SpecLength),
     MaxWidth(SpecLength),
+    MaxHeight(SpecLength),
+    BoxSizing(BoxSizing),
+    OverflowX(Overflow),
+    OverflowY(Overflow),
+    Opacity(f32),
+    Position(Position),
+    Inset(Side, SpecLength),
+    ZIndex(Option<i32>),
+    FlexDirection(FlexDirection),
+    FlexWrap(FlexWrap),
+    JustifyContent(JustifyContent),
+    AlignItems(AlignItems),
+    AlignSelf(AlignSelf),
+    FlexGrow(f32),
+    FlexShrink(f32),
+    FlexBasis(SpecLength),
+    RowGap(SpecLength),
+    ColumnGap(SpecLength),
+    GridTemplateColumns(Vec<SpecTrackSize>),
+    GridTemplateRows(Vec<SpecTrackSize>),
+    GridColumn(GridPlacement),
+    GridRow(GridPlacement),
     ListStyle(ListStyle),
     Visibility(bool),
+    CustomProp { name: Box<str>, value: Box<str> },
+    VarProp { name: Box<str>, value: Box<str> },
 }
 
 #[derive(Debug, Default)]
@@ -291,6 +336,13 @@ pub fn parse_media_list(input: &str) -> MediaList {
 
 pub fn parse_declarations(body: &str) -> DeclBlock {
     let mut block = DeclBlock::default();
+    parse_declarations_into(body, &mut block);
+    block
+}
+
+pub fn parse_declarations_into(body: &str, block: &mut DeclBlock) {
+    block.normal.clear();
+    block.important.clear();
     let mut rest = body;
     while !rest.trim().is_empty() {
         let end = find_top_level(rest, &[';']).unwrap_or(rest.len());
@@ -299,10 +351,12 @@ pub fn parse_declarations(body: &str) -> DeclBlock {
         let Some((name, value)) = decl.split_once(':') else {
             continue;
         };
-        let name = name.trim().to_ascii_lowercase();
+        let raw_name = name.trim();
         let mut value = value.trim();
         let mut important = false;
-        if let Some(pos) = value.to_ascii_lowercase().rfind("!important") {
+        if let Some(pos) = value.to_ascii_lowercase().rfind("!important")
+            && value[pos..].trim().eq_ignore_ascii_case("!important")
+        {
             important = true;
             value = value[..pos].trim();
         }
@@ -311,9 +365,16 @@ pub fn parse_declarations(body: &str) -> DeclBlock {
         } else {
             &mut block.normal
         };
+        if raw_name.starts_with("--") {
+            target.push(Decl::CustomProp {
+                name: raw_name.into(),
+                value: value.into(),
+            });
+            continue;
+        }
+        let name = raw_name.to_ascii_lowercase();
         parse_property(&name, value, target);
     }
-    block
 }
 
 /// Divide um valor em componentes separados por espaço, sem quebrar `rgb(1, 2, 3)`.
@@ -494,25 +555,37 @@ fn parse_display(v: &str) -> Option<Display> {
     Some(match v {
         "none" => Display::None,
         "inline" | "contents" => Display::Inline,
-        "inline-block" | "inline-flex" | "inline-grid" | "inline-table" => Display::InlineBlock,
+        "inline-block" => Display::InlineBlock,
+        "inline-flex" => Display::InlineFlex,
+        "flex" => Display::Flex,
+        "grid" | "inline-grid" => Display::Grid,
+        "table" | "inline-table" => Display::Table,
+        "table-row" => Display::TableRow,
+        "table-cell" => Display::TableCell,
         "list-item" => Display::ListItem,
-        // flex/grid/table: por enquanto viram blocos empilhados (Taffy entra na Fase 1)
-        "block" | "flex" | "grid" | "table" | "table-row" | "table-cell" | "table-row-group"
-        | "table-header-group" | "table-footer-group" | "table-caption" | "flow-root" => {
-            Display::Block
-        }
+        "block" | "table-row-group" | "table-header-group" | "table-footer-group"
+        | "table-caption" | "flow-root" => Display::Block,
         _ => return None,
     })
 }
 
-fn parse_property(name: &str, value: &str, out: &mut Vec<Decl>) {
+fn contains_var_call(v: &str) -> bool {
+    v.as_bytes()
+        .windows(4)
+        .any(|w| w.eq_ignore_ascii_case(b"var("))
+}
+
+pub(crate) fn parse_property(name: &str, value: &str, out: &mut Vec<Decl>) {
+    if contains_var_call(value) {
+        out.push(Decl::VarProp {
+            name: name.into(),
+            value: value.into(),
+        });
+        return;
+    }
     let lv = value.to_ascii_lowercase();
-    let v = lv.as_str();
-    // `inherit`, `initial`, `unset`, `var()` e `calc()` ainda não: a declaração é ignorada
-    if matches!(v, "inherit" | "initial" | "unset" | "revert")
-        || v.contains("var(")
-        || v.contains("calc(")
-    {
+    let v = lv.as_str().trim();
+    if matches!(v, "inherit" | "initial" | "unset" | "revert") || v.contains("calc(") {
         return;
     }
     match name {
@@ -630,12 +703,162 @@ fn parse_property(name: &str, value: &str, out: &mut Vec<Decl>) {
         }
         "width" => out.extend(parse_length(v).map(Decl::Width)),
         "height" => out.extend(parse_length(v).map(Decl::Height)),
+        "min-width" => out.extend(parse_length(v).map(Decl::MinWidth)),
         "min-height" => out.extend(parse_length(v).map(Decl::MinHeight)),
         "max-width" => {
             if v == "none" {
                 out.push(Decl::MaxWidth(SpecLength::Auto));
             } else {
                 out.extend(parse_length(v).map(Decl::MaxWidth));
+            }
+        }
+        "max-height" => {
+            if v == "none" {
+                out.push(Decl::MaxHeight(SpecLength::Auto));
+            } else {
+                out.extend(parse_length(v).map(Decl::MaxHeight));
+            }
+        }
+        "box-sizing" => match v {
+            "content-box" => out.push(Decl::BoxSizing(BoxSizing::ContentBox)),
+            "border-box" => out.push(Decl::BoxSizing(BoxSizing::BorderBox)),
+            _ => {}
+        },
+        "overflow" => {
+            let vals: Option<Vec<Overflow>> =
+                components(v).into_iter().map(parse_overflow).collect();
+            if let Some(vals) = vals.filter(|v| !v.is_empty()) {
+                let x = vals[0];
+                let y = *vals.get(1).unwrap_or(&x);
+                out.push(Decl::OverflowX(x));
+                out.push(Decl::OverflowY(y));
+            }
+        }
+        "overflow-x" => out.extend(parse_overflow(v).map(Decl::OverflowX)),
+        "overflow-y" => out.extend(parse_overflow(v).map(Decl::OverflowY)),
+        "opacity" => {
+            let alpha = if let Some(p) = v.strip_suffix('%') {
+                p.parse::<f32>().ok().map(|x| x / 100.0)
+            } else {
+                v.parse::<f32>().ok()
+            };
+            if let Some(a) = alpha {
+                out.push(Decl::Opacity(a.clamp(0.0, 1.0)));
+            }
+        }
+        "position" => match v {
+            "static" => out.push(Decl::Position(Position::Static)),
+            "relative" | "sticky" => out.push(Decl::Position(Position::Relative)),
+            "absolute" => out.push(Decl::Position(Position::Absolute)),
+            "fixed" => out.push(Decl::Position(Position::Fixed)),
+            _ => {}
+        },
+        "top" => out.extend(parse_length(v).map(|l| Decl::Inset(0, l))),
+        "right" => out.extend(parse_length(v).map(|l| Decl::Inset(1, l))),
+        "bottom" => out.extend(parse_length(v).map(|l| Decl::Inset(2, l))),
+        "left" => out.extend(parse_length(v).map(|l| Decl::Inset(3, l))),
+        "inset" => {
+            let vals: Option<Vec<SpecLength>> =
+                components(v).into_iter().map(parse_length).collect();
+            if let Some(sides) = vals.as_deref().and_then(four_sides) {
+                for (i, l) in sides.into_iter().enumerate() {
+                    out.push(Decl::Inset(i, l));
+                }
+            }
+        }
+        "inset-block" | "inset-inline" => {
+            let vals: Option<Vec<SpecLength>> =
+                components(v).into_iter().map(parse_length).collect();
+            if let Some(vals) = vals.filter(|v| !v.is_empty()) {
+                let (a, b) = (vals[0], *vals.get(1).unwrap_or(&vals[0]));
+                let sides = if name.ends_with("block") {
+                    [0, 2]
+                } else {
+                    [3, 1]
+                };
+                for (s, l) in sides.into_iter().zip([a, b]) {
+                    out.push(Decl::Inset(s, l));
+                }
+            }
+        }
+        "z-index" => {
+            if v == "auto" {
+                out.push(Decl::ZIndex(None));
+            } else if let Ok(z) = v.parse::<i32>() {
+                out.push(Decl::ZIndex(Some(z)));
+            }
+        }
+        "flex-direction" => out.extend(parse_flex_direction(v).map(Decl::FlexDirection)),
+        "flex-wrap" => out.extend(parse_flex_wrap(v).map(Decl::FlexWrap)),
+        "flex-flow" => {
+            for c in components(v) {
+                if let Some(d) = parse_flex_direction(c) {
+                    out.push(Decl::FlexDirection(d));
+                } else if let Some(w) = parse_flex_wrap(c) {
+                    out.push(Decl::FlexWrap(w));
+                }
+            }
+        }
+        "justify-content" => out.extend(parse_justify_content(v).map(Decl::JustifyContent)),
+        "align-items" => out.extend(parse_align_items(v).map(Decl::AlignItems)),
+        "align-self" => out.extend(parse_align_self(v).map(Decl::AlignSelf)),
+        "place-items" => {
+            if let Some(first) = components(v).first().and_then(|c| parse_align_items(c)) {
+                out.push(Decl::AlignItems(first));
+            }
+        }
+        "flex-grow" => {
+            if let Ok(g) = v.parse::<f32>()
+                && g >= 0.0
+            {
+                out.push(Decl::FlexGrow(g));
+            }
+        }
+        "flex-shrink" => {
+            if let Ok(s) = v.parse::<f32>()
+                && s >= 0.0
+            {
+                out.push(Decl::FlexShrink(s));
+            }
+        }
+        "flex-basis" => {
+            if v == "content" || v == "auto" {
+                out.push(Decl::FlexBasis(SpecLength::Auto));
+            } else {
+                out.extend(parse_length(v).map(Decl::FlexBasis));
+            }
+        }
+        "flex" => parse_flex_shorthand(v, out),
+        "gap" | "grid-gap" => {
+            let vals: Option<Vec<SpecLength>> =
+                components(v).into_iter().map(parse_length).collect();
+            if let Some(vals) = vals.filter(|v| !v.is_empty()) {
+                let row = vals[0];
+                let col = *vals.get(1).unwrap_or(&row);
+                out.push(Decl::RowGap(row));
+                out.push(Decl::ColumnGap(col));
+            }
+        }
+        "row-gap" | "grid-row-gap" => out.extend(parse_length(v).map(Decl::RowGap)),
+        "column-gap" | "grid-column-gap" => out.extend(parse_length(v).map(Decl::ColumnGap)),
+        "grid-template-columns" => {
+            if let Some(tracks) = parse_track_list(v) {
+                out.push(Decl::GridTemplateColumns(tracks));
+            }
+        }
+        "grid-template-rows" => {
+            if let Some(tracks) = parse_track_list(v) {
+                out.push(Decl::GridTemplateRows(tracks));
+            }
+        }
+        "grid-column" => {
+            if let Some(p) = parse_grid_placement(v) {
+                out.push(Decl::GridColumn(p));
+            }
+        }
+        "grid-row" => {
+            if let Some(p) = parse_grid_placement(v) {
+                out.push(Decl::GridRow(p));
             }
         }
         "list-style-type" | "list-style" => {
@@ -721,6 +944,273 @@ fn parse_font_shorthand(value: &str, out: &mut Vec<Decl>) {
     }
 }
 
+fn parse_overflow(v: &str) -> Option<Overflow> {
+    Some(match v {
+        "visible" => Overflow::Visible,
+        "hidden" | "clip" => Overflow::Hidden,
+        "scroll" => Overflow::Scroll,
+        "auto" => Overflow::Auto,
+        _ => return None,
+    })
+}
+
+fn parse_flex_direction(v: &str) -> Option<FlexDirection> {
+    Some(match v {
+        "row" => FlexDirection::Row,
+        "row-reverse" => FlexDirection::RowReverse,
+        "column" => FlexDirection::Column,
+        "column-reverse" => FlexDirection::ColumnReverse,
+        _ => return None,
+    })
+}
+
+fn parse_flex_wrap(v: &str) -> Option<FlexWrap> {
+    Some(match v {
+        "nowrap" => FlexWrap::NoWrap,
+        "wrap" => FlexWrap::Wrap,
+        "wrap-reverse" => FlexWrap::WrapReverse,
+        _ => return None,
+    })
+}
+
+fn parse_justify_content(v: &str) -> Option<JustifyContent> {
+    Some(match v {
+        "flex-start" | "start" | "left" | "normal" => JustifyContent::FlexStart,
+        "flex-end" | "end" | "right" => JustifyContent::FlexEnd,
+        "center" => JustifyContent::Center,
+        "space-between" => JustifyContent::SpaceBetween,
+        "space-around" => JustifyContent::SpaceAround,
+        "space-evenly" => JustifyContent::SpaceEvenly,
+        "stretch" => JustifyContent::Stretch,
+        _ => return None,
+    })
+}
+
+fn parse_align_items(v: &str) -> Option<AlignItems> {
+    Some(match v {
+        "stretch" | "normal" => AlignItems::Stretch,
+        "flex-start" | "start" | "self-start" => AlignItems::FlexStart,
+        "flex-end" | "end" | "self-end" => AlignItems::FlexEnd,
+        "center" => AlignItems::Center,
+        "baseline" => AlignItems::Baseline,
+        _ => return None,
+    })
+}
+
+fn parse_align_self(v: &str) -> Option<AlignSelf> {
+    Some(match v {
+        "auto" => AlignSelf::Auto,
+        "stretch" | "normal" => AlignSelf::Stretch,
+        "flex-start" | "start" | "self-start" => AlignSelf::FlexStart,
+        "flex-end" | "end" | "self-end" => AlignSelf::FlexEnd,
+        "center" => AlignSelf::Center,
+        "baseline" => AlignSelf::Baseline,
+        _ => return None,
+    })
+}
+
+fn parse_unitless_nonneg(s: &str) -> Option<f32> {
+    if s.is_empty()
+        || !s
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b == b'.' || b == b'+' || b == b'-')
+    {
+        return None;
+    }
+    s.parse::<f32>().ok().filter(|n| *n >= 0.0)
+}
+
+fn parse_flex_basis_token(s: &str) -> Option<SpecLength> {
+    if s == "content" || s == "auto" {
+        Some(SpecLength::Auto)
+    } else {
+        parse_length(s)
+    }
+}
+
+fn parse_flex_shorthand(v: &str, out: &mut Vec<Decl>) {
+    match v {
+        "none" => {
+            out.push(Decl::FlexGrow(0.0));
+            out.push(Decl::FlexShrink(0.0));
+            out.push(Decl::FlexBasis(SpecLength::Auto));
+            return;
+        }
+        "auto" => {
+            out.push(Decl::FlexGrow(1.0));
+            out.push(Decl::FlexShrink(1.0));
+            out.push(Decl::FlexBasis(SpecLength::Auto));
+            return;
+        }
+        "initial" => {
+            out.push(Decl::FlexGrow(0.0));
+            out.push(Decl::FlexShrink(1.0));
+            out.push(Decl::FlexBasis(SpecLength::Auto));
+            return;
+        }
+        _ => {}
+    }
+    let comps = components(v);
+    match comps.as_slice() {
+        [a] => {
+            if let Some(g) = parse_unitless_nonneg(a) {
+                out.push(Decl::FlexGrow(g));
+                out.push(Decl::FlexShrink(1.0));
+                out.push(Decl::FlexBasis(SpecLength::Px(0.0)));
+            } else if let Some(b) = parse_flex_basis_token(a) {
+                out.push(Decl::FlexGrow(1.0));
+                out.push(Decl::FlexShrink(1.0));
+                out.push(Decl::FlexBasis(b));
+            }
+        }
+        [a, b] => {
+            let Some(g) = parse_unitless_nonneg(a) else {
+                return;
+            };
+            if let Some(s) = parse_unitless_nonneg(b) {
+                out.push(Decl::FlexGrow(g));
+                out.push(Decl::FlexShrink(s));
+                out.push(Decl::FlexBasis(SpecLength::Px(0.0)));
+            } else if let Some(basis) = parse_flex_basis_token(b) {
+                out.push(Decl::FlexGrow(g));
+                out.push(Decl::FlexShrink(1.0));
+                out.push(Decl::FlexBasis(basis));
+            }
+        }
+        [a, b, c] => {
+            if let (Some(g), Some(s), Some(basis)) = (
+                parse_unitless_nonneg(a),
+                parse_unitless_nonneg(b),
+                parse_flex_basis_token(c),
+            ) {
+                out.push(Decl::FlexGrow(g));
+                out.push(Decl::FlexShrink(s));
+                out.push(Decl::FlexBasis(basis));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_track_bound(s: &str) -> Option<SpecTrackBound> {
+    match s {
+        "min-content" => Some(SpecTrackBound::MinContent),
+        "max-content" => Some(SpecTrackBound::MaxContent),
+        _ if s.ends_with("fr") => s[..s.len() - 2]
+            .parse::<f32>()
+            .ok()
+            .filter(|n| *n >= 0.0)
+            .map(SpecTrackBound::Fr),
+        _ => parse_length(s).map(SpecTrackBound::Length),
+    }
+}
+
+fn parse_single_track(s: &str) -> Option<SpecTrackSize> {
+    match s {
+        "min-content" => Some(SpecTrackSize::MinContent),
+        "max-content" => Some(SpecTrackSize::MaxContent),
+        _ if s.ends_with("fr") => s[..s.len() - 2]
+            .parse::<f32>()
+            .ok()
+            .filter(|n| *n >= 0.0)
+            .map(SpecTrackSize::Fr),
+        _ => parse_length(s).map(SpecTrackSize::Length),
+    }
+}
+
+fn parse_track_into(s: &str, out: &mut Vec<SpecTrackSize>) -> Option<()> {
+    let comps = components(s);
+    if comps.is_empty() {
+        return None;
+    }
+    for c in comps {
+        if let Some(inner) = c.strip_prefix("repeat(").and_then(|r| r.strip_suffix(')')) {
+            let comma = find_top_level(inner, &[','])?;
+            let count_str = inner[..comma].trim();
+            let pat_str = inner[comma + 1..].trim();
+            let mut pat = Vec::new();
+            parse_track_into(pat_str, &mut pat)?;
+            let count = if let Ok(n) = count_str.parse::<usize>() {
+                if n == 0 {
+                    return None;
+                }
+                n.min(1024)
+            } else if matches!(count_str, "auto-fill" | "auto-fit") {
+                1
+            } else {
+                return None;
+            };
+            for _ in 0..count {
+                out.extend_from_slice(&pat);
+            }
+        } else if let Some(inner) = c.strip_prefix("minmax(").and_then(|r| r.strip_suffix(')')) {
+            let comma = find_top_level(inner, &[','])?;
+            let min_b = parse_track_bound(inner[..comma].trim())?;
+            let max_b = parse_track_bound(inner[comma + 1..].trim())?;
+            out.push(SpecTrackSize::MinMax(min_b, max_b));
+        } else {
+            out.push(parse_single_track(c)?);
+        }
+    }
+    Some(())
+}
+
+fn parse_track_list(v: &str) -> Option<Vec<SpecTrackSize>> {
+    if v == "none" {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::new();
+    parse_track_into(v, &mut out)?;
+    Some(out)
+}
+
+fn parse_grid_placement(v: &str) -> Option<GridPlacement> {
+    if v == "auto" {
+        return Some(GridPlacement::default());
+    }
+    let (start_s, end_s) = match v.split_once('/') {
+        Some((a, b)) => (a.trim(), Some(b.trim())),
+        None => (v.trim(), None),
+    };
+    let parse_span = |s: &str| -> Option<u16> {
+        s.strip_prefix("span")
+            .and_then(|r| r.trim().parse::<u16>().ok())
+            .filter(|n| *n > 0)
+    };
+    if end_s.is_none()
+        && let Some(sp) = parse_span(start_s)
+    {
+        return Some(GridPlacement {
+            start: None,
+            span: Some(sp),
+        });
+    }
+    let start = if start_s == "auto" {
+        None
+    } else {
+        start_s.parse::<i16>().ok()
+    };
+    let span = match end_s {
+        None => None,
+        Some("auto") => None,
+        Some(es) => {
+            if let Some(sp) = parse_span(es) {
+                Some(sp)
+            } else if let (Some(st), Ok(en)) = (start, es.parse::<i16>())
+                && en > st
+            {
+                Some((en - st) as u16)
+            } else {
+                None
+            }
+        }
+    };
+    if start.is_none() && span.is_none() {
+        return None;
+    }
+    Some(GridPlacement { start, span })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,5 +1237,33 @@ mod tests {
         assert_eq!(parse_length("50%"), Some(SpecLength::Percent(50.0)));
         assert_eq!(parse_length("2rem"), Some(SpecLength::Rem(2.0)));
         assert_eq!(parse_length("abc"), None);
+    }
+
+    #[test]
+    fn flex_grid_e_atalhos() {
+        let d = parse_declarations(
+            "display: flex; flex: 1 0 20px; gap: 8px 16px; \
+             grid-template-columns: 100px repeat(2, 1fr 20%) auto; \
+             box-sizing: border-box; opacity: 50%; overflow: hidden scroll; \
+             position: relative; inset: 4px 8px; z-index: 10; \
+             background: url(x.png) rgba(10, 20, 30, 0.5); border-radius: 50%;",
+        );
+        assert!(d.normal.iter().any(|x| matches!(x, Decl::Display(Display::Flex))));
+        assert!(d.normal.iter().any(|x| matches!(x, Decl::FlexGrow(g) if (*g - 1.0).abs() < 1e-5)));
+        assert!(d.normal.iter().any(|x| matches!(x, Decl::FlexShrink(s) if *s == 0.0)));
+        assert!(d.normal.iter().any(|x| matches!(x, Decl::FlexBasis(SpecLength::Px(20.0)))));
+        assert!(d.normal.iter().any(|x| matches!(x, Decl::RowGap(SpecLength::Px(8.0)))));
+        assert!(d.normal.iter().any(|x| matches!(x, Decl::ColumnGap(SpecLength::Px(16.0)))));
+        assert!(d.normal.iter().any(|x| matches!(x, Decl::BoxSizing(BoxSizing::BorderBox))));
+        assert!(d.normal.iter().any(|x| matches!(x, Decl::Opacity(a) if (*a - 0.5).abs() < 1e-5)));
+        assert!(d.normal.iter().any(|x| matches!(x, Decl::OverflowX(Overflow::Hidden))));
+        assert!(d.normal.iter().any(|x| matches!(x, Decl::OverflowY(Overflow::Scroll))));
+        assert!(d.normal.iter().any(|x| matches!(x, Decl::Position(Position::Relative))));
+        assert!(d.normal.iter().any(|x| matches!(x, Decl::ZIndex(Some(10)))));
+        let cols = d.normal.iter().find_map(|x| match x {
+            Decl::GridTemplateColumns(t) => Some(t),
+            _ => None,
+        }).unwrap();
+        assert_eq!(cols.len(), 6);
     }
 }
