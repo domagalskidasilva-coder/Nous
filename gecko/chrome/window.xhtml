@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet href="chrome://global/skin/" type="text/css"?>
+<?xml-stylesheet href="chrome://nous/content/window.css" type="text/css"?>
+<window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+        xmlns:html="http://www.w3.org/1999/xhtml"
+        title="Nous" windowtype="nous:browser" width="1180" height="760"
+        orient="vertical">
+  <html:script src="chrome://nous/content/window.js" defer="defer"></html:script>
+  <html:header class="toolbar">
+    <html:div class="tab-row">
+      <html:span class="brand">Nous</html:span>
+      <html:div id="tabs" role="tablist" aria-label="Abas"></html:div>
+      <html:button id="new-tab" title="Nova aba (Ctrl+T)" aria-label="Nova aba">+</html:button>
+    </html:div>
+    <html:form id="navigation" class="navigation">
+      <html:button id="back" type="button" aria-label="Voltar" title="Voltar">←</html:button>
+      <html:button id="forward" type="button" aria-label="Avançar" title="Avançar">→</html:button>
+      <html:button id="reload" type="button" aria-label="Recarregar" title="Recarregar">↻</html:button>
+      <html:input id="address" type="text" aria-label="Endereço ou pesquisa"
+                  placeholder="Pesquisar ou digitar um endereço"
+                  autocomplete="off" spellcheck="false"/>
+      <html:button id="go" type="submit">Ir</html:button>
+    </html:form>
+    <html:p id="message" role="status" hidden="hidden"></html:p>
+  </html:header>
+  <box id="pages" flex="1"/>
+</window>

@@ -1,0 +1,38 @@
+:root {
+  color-scheme: dark;
+  background: #10131d;
+  color: #edf1fa;
+  font-family: "Segoe UI", sans-serif;
+  font-size: 14px;
+}
+
+.toolbar { background: #171c2b; padding: 10px 14px 12px; border-bottom: 1px solid #30394e; }
+.tab-row, .navigation, #tabs, .tab { display: flex; align-items: center; gap: 6px; }
+.tab-row { min-height: 35px; margin-bottom: 8px; }
+.brand { font-weight: 650; margin-right: 10px; }
+#tabs { min-width: 0; overflow-x: auto; }
+.tab { border: 1px solid transparent; border-radius: 8px; padding-right: 3px; }
+.tab:has([aria-selected="true"]) { background: #29334b; border-color: #3a4b68; }
+
+button, input { font: inherit; color: inherit; }
+button { cursor: pointer; border: 0; border-radius: 6px; padding: 5px 9px; background: transparent; }
+button:hover:not(:disabled) { background: #384663; }
+button:disabled { opacity: 0.4; cursor: default; }
+button:focus-visible, input:focus-visible { outline: 2px solid #82aaff; outline-offset: 1px; }
+.tab button[role="tab"] { max-width: 175px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.close { padding: 2px 6px; }
+
+#address {
+  flex: 1;
+  min-width: 0;
+  background: #101522;
+  border: 1px solid #36435b;
+  border-radius: 8px;
+  padding: 8px 11px;
+}
+
+#go { background: #293b5d; padding: 8px 13px; }
+#message { margin: 8px 0 0; color: #ffd291; }
+#pages { display: flex; min-height: 0; background: #121724; }
+#pages browser { flex: 1; min-width: 0; min-height: 0; }
+#pages browser[hidden] { display: none; }

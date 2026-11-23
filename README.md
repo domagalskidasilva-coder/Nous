@@ -58,6 +58,19 @@ ferramentas `Hostx64`), use o script que carrega o ambiente do Visual Studio:
 Captura sem janela (testes visuais): `nous --captura saida.png https://example.com`
 (acrescente `--claro` para o tema claro). Medição de RAM: `.\scripts\medir-ram.ps1`.
 
+## Prévia desktop com Gecko no Windows
+
+A prévia tem uma janela do Nous com abas e barra de endereços. Ela usa o runtime
+do Firefox 153 ESR e guarda o perfil de teste em `target/nous-gecko-runtime/nous-profile`.
+
+```powershell
+.\scripts\nous-gecko.ps1 -FirefoxPath 'C:\caminho\para\firefox.exe'
+```
+
+Com o runtime extraído em `target/nous-gecko-runtime/core`, o parâmetro
+`-FirefoxPath` pode ser omitido. Use `-Url` para abrir uma página ao iniciar.
+O [Firefox ESR está disponível no site da Mozilla](https://www.mozilla.org/firefox/enterprise/).
+
 ## Atalhos de teclado
 
 | Atalho | Ação |
