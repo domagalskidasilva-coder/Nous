@@ -5,6 +5,7 @@
 //! são átomos internados (`markup5ever`), então `div` existe uma vez só na memória.
 
 pub use markup5ever::{LocalName, Namespace, QualName, local_name, ns};
+use std::num::NonZeroU32;
 
 /// Atributo de elemento. O valor é um `Box<str>` (e não o `StrTendril` do html5ever, que
 /// tem contagem de referência não atômica): assim o documento pode ser montado numa thread
@@ -25,16 +26,20 @@ impl From<markup5ever::Attribute> for Attribute {
 }
 
 /// Índice de um nó dentro do [`Document`].
+///
+/// Armazenado como [`NonZeroU32`] (`índice + 1`) para que `Option<NodeId>` ocupe
+/// apenas 4 bytes via niche optimization.
+#[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct NodeId(u32);
+pub struct NodeId(NonZeroU32);
 
 impl NodeId {
     /// O nó raiz (o próprio documento) é sempre o primeiro da arena.
-    pub const DOCUMENT: NodeId = NodeId(0);
+    pub const DOCUMENT: NodeId = NodeId(NonZeroU32::new(1).unwrap());
 
     #[inline]
     pub fn index(self) -> usize {
-        self.0 as usize
+        self.0.get() as usize - 1
     }
 }
 
@@ -70,17 +75,39 @@ impl ElementData {
     pub fn is(&self, local: &LocalName) -> bool {
         self.name.ns == ns!(html) && &self.name.local == local
     }
+
+    /// Define ou atualiza o valor de um atributo (em `ns!()`).
+    pub fn set_attr(&mut self, name: &str, value: &str) {
+        if let Some(existing) = self.attrs.iter_mut().find(|a| &*a.name.local == name) {
+            existing.value = Box::from(value);
+        } else {
+            self.attrs.push(Attribute {
+                name: QualName::new(None, ns!(), LocalName::from(name)),
+                value: Box::from(value),
+            });
+        }
+    }
+
+    /// Remove todos os atributos com esse nome local; retorna `true` se algo foi removido.
+    pub fn remove_attr(&mut self, name: &str) -> bool {
+        let before = self.attrs.len();
+        self.attrs.retain(|a| &*a.name.local != name);
+        self.attrs.len() != before
+    }
+}
+
+#[derive(Debug)]
+pub struct DoctypeData {
+    pub name: Box<str>,
 }
 
 #[derive(Debug)]
 pub enum NodeData {
     Document,
-    Doctype {
-        name: String,
-    },
+    Doctype(Box<DoctypeData>),
     Element(ElementData),
     Text(String),
-    Comment(String),
+    Comment(Box<str>),
     /// Fragmento sem pai (usado por `<template>`).
     Fragment,
 }
@@ -114,9 +141,23 @@ impl Node {
         }
     }
 
+    pub fn as_element_mut(&mut self) -> Option<&mut ElementData> {
+        match &mut self.data {
+            NodeData::Element(e) => Some(e),
+            _ => None,
+        }
+    }
+
     pub fn as_text(&self) -> Option<&str> {
         match &self.data {
             NodeData::Text(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    pub fn as_comment(&self) -> Option<&str> {
+        match &self.data {
+            NodeData::Comment(c) => Some(c),
             _ => None,
         }
     }
@@ -151,9 +192,30 @@ impl Document {
     }
 
     pub fn create(&mut self, data: NodeData) -> NodeId {
-        let id = NodeId(u32::try_from(self.nodes.len()).expect("documento grande demais"));
+        let raw = self
+            .nodes
+            .len()
+            .checked_add(1)
+            .and_then(|n| u32::try_from(n).ok())
+            .and_then(NonZeroU32::new)
+            .expect("documento grande demais");
+        let id = NodeId(raw);
         self.nodes.push(Node::new(data));
         id
+    }
+
+    /// Cria um novo nó de elemento HTML (`tag` normalizada para minúsculas ASCII).
+    pub fn create_element(&mut self, tag: &str) -> NodeId {
+        let local = if tag.bytes().any(|b| b.is_ascii_uppercase()) {
+            LocalName::from(tag.to_ascii_lowercase())
+        } else {
+            LocalName::from(tag)
+        };
+        self.create(NodeData::Element(ElementData {
+            name: QualName::new(None, ns!(html), local),
+            attrs: Vec::new(),
+            template_contents: None,
+        }))
     }
 
     #[inline]
@@ -168,6 +230,10 @@ impl Document {
 
     pub fn element(&self, id: NodeId) -> Option<&ElementData> {
         self.node(id).as_element()
+    }
+
+    pub fn element_mut(&mut self, id: NodeId) -> Option<&mut ElementData> {
+        self.node_mut(id).as_element_mut()
     }
 
     /// Remove `child` de onde estiver (o nó continua na arena, só fica solto).
@@ -288,6 +354,80 @@ impl Document {
         out
     }
 
+    /// Substitui o conteúdo textual do nó: em `Text`/`Comment` atualiza o texto; em
+    /// `Element`/`Fragment` remove os filhos e cria (ou reaproveita) um único nó de texto.
+    pub fn set_text_content(&mut self, id: NodeId, text: &str) {
+        match &mut self.node_mut(id).data {
+            NodeData::Text(t) => {
+                t.clear();
+                t.push_str(text);
+                return;
+            }
+            NodeData::Comment(c) => {
+                *c = Box::from(text);
+                return;
+            }
+            NodeData::Document | NodeData::Doctype(_) => return,
+            NodeData::Element(_) | NodeData::Fragment => {}
+        }
+
+        // Reaproveita um único filho de texto existente para evitar crescer a arena em atualizações repetidas.
+        let (first, last) = {
+            let n = self.node(id);
+            (n.first_child, n.last_child)
+        };
+        if let (Some(f), Some(l)) = (first, last)
+            && f == l
+            && let NodeData::Text(t) = &mut self.node_mut(f).data
+        {
+            if text.is_empty() {
+                self.detach(f);
+            } else {
+                t.clear();
+                t.push_str(text);
+            }
+            return;
+        }
+
+        while let Some(child) = self.node(id).first_child {
+            self.detach(child);
+        }
+        if !text.is_empty() {
+            self.append_text(id, text);
+        }
+    }
+
+    pub fn get_element_by_id(&self, id: &str) -> Option<NodeId> {
+        if id.is_empty() {
+            return None;
+        }
+        self.descendants(NodeId::DOCUMENT)
+            .find(|&n| self.element(n).is_some_and(|e| e.id() == Some(id)))
+    }
+
+    pub fn elements_by_tag(&self, tag: &str) -> Vec<NodeId> {
+        let all = tag == "*";
+        self.descendants(NodeId::DOCUMENT)
+            .filter(|&n| {
+                self.element(n)
+                    .is_some_and(|e| all || str::eq_ignore_ascii_case(e.local_name(), tag))
+            })
+            .collect()
+    }
+
+    pub fn elements_by_class(&self, class: &str) -> Vec<NodeId> {
+        let classes: Vec<&str> = class.split_ascii_whitespace().collect();
+        if classes.is_empty() {
+            return Vec::new();
+        }
+        self.descendants(NodeId::DOCUMENT)
+            .filter(|&n| {
+                self.element(n)
+                    .is_some_and(|e| classes.iter().all(|c| e.has_class(c)))
+            })
+            .collect()
+    }
+
     pub fn title(&self) -> Option<String> {
         let t = self.find_element(&local_name!("title"))?;
         let text = self.text_content(t);
@@ -301,17 +441,34 @@ impl Document {
         self.element(b)?.attr("href")
     }
 
+    /// Libera a capacidade sobressalente da arena, atributos e nós de texto.
+    pub fn compact(&mut self) {
+        self.nodes.shrink_to_fit();
+        for node in &mut self.nodes {
+            match &mut node.data {
+                NodeData::Element(el) => {
+                    el.attrs.shrink_to_fit();
+                }
+                NodeData::Text(t) => {
+                    t.shrink_to_fit();
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Estimativa de memória usada pelo DOM (para `nous://memoria`).
     pub fn approx_heap_bytes(&self) -> usize {
         let mut total = self.nodes.capacity() * std::mem::size_of::<Node>();
         for n in &self.nodes {
             total += match &n.data {
-                NodeData::Text(t) | NodeData::Comment(t) => t.capacity(),
+                NodeData::Text(t) => t.capacity(),
+                NodeData::Comment(t) => t.len(),
                 NodeData::Element(e) => {
                     e.attrs.capacity() * std::mem::size_of::<Attribute>()
                         + e.attrs.iter().map(|a| a.value.len()).sum::<usize>()
                 }
-                NodeData::Doctype { name } => name.capacity(),
+                NodeData::Doctype(d) => std::mem::size_of::<DoctypeData>() + d.name.len(),
                 _ => 0,
             };
         }
@@ -394,5 +551,97 @@ mod tests {
         d.append_text(html, "mundo");
         assert_eq!(d.text_content(html), "oi mundo");
         assert_eq!(d.descendants(NodeId::DOCUMENT).count(), 4);
+    }
+
+    #[test]
+    fn node_id_niche_and_compact_sizes() {
+        assert_eq!(std::mem::size_of::<NodeId>(), 4);
+        assert_eq!(std::mem::size_of::<Option<NodeId>>(), 4);
+        assert_eq!(NodeId::DOCUMENT.index(), 0);
+        assert!(std::mem::size_of::<NodeData>() <= 56);
+        assert!(std::mem::size_of::<Node>() <= 80);
+
+        let mut d = Document::new();
+        let first = d.create_element("div");
+        assert_eq!(first.index(), 1);
+        assert_eq!(d.len(), 2);
+    }
+
+    #[test]
+    fn compact_shrinks_slack_capacity() {
+        let mut d = Document::new();
+        let div = d.create_element("div");
+        d.append(NodeId::DOCUMENT, div);
+        for i in 0..40 {
+            d.element_mut(div)
+                .unwrap()
+                .set_attr(&format!("data-k{i}"), "valor");
+        }
+        for i in 10..40 {
+            assert!(d.element_mut(div).unwrap().remove_attr(&format!("data-k{i}")));
+        }
+        assert!(!d.element_mut(div).unwrap().remove_attr("inexistente"));
+        let txt = d.create(NodeData::Text(String::with_capacity(2048)));
+        d.append(div, txt);
+        d.set_text_content(txt, "curto");
+
+        let before = d.approx_heap_bytes();
+        d.compact();
+        let after = d.approx_heap_bytes();
+        assert!(after < before);
+        assert_eq!(d.node(txt).as_text(), Some("curto"));
+        assert_eq!(d.element(div).unwrap().attrs.len(), 10);
+    }
+
+    #[test]
+    fn dom_query_and_mutation_helpers() {
+        let mut d = Document::new();
+        let html = d.create_element("HTML");
+        let body = d.create_element("body");
+        let main = d.create_element("main");
+        let p1 = d.create_element("p");
+        let p2 = d.create_element("p");
+
+        d.append(NodeId::DOCUMENT, html);
+        d.append(html, body);
+        d.append(body, main);
+        d.append(main, p1);
+        d.append(main, p2);
+
+        d.element_mut(main).unwrap().set_attr("id", "principal");
+        d.element_mut(p1).unwrap().set_attr("class", "card destaque");
+        d.element_mut(p2).unwrap().set_attr("class", "card");
+        d.element_mut(p1).unwrap().set_attr("data-v", "1");
+        d.element_mut(p1).unwrap().set_attr("data-v", "2");
+        assert_eq!(d.element(p1).unwrap().attr("data-v"), Some("2"));
+
+        assert_eq!(d.get_element_by_id("principal"), Some(main));
+        assert_eq!(d.get_element_by_id(""), None);
+        assert_eq!(d.get_element_by_id("ausente"), None);
+
+        assert_eq!(d.elements_by_tag("P"), vec![p1, p2]);
+        assert_eq!(d.elements_by_tag("p"), vec![p1, p2]);
+        assert_eq!(d.elements_by_tag("*"), vec![html, body, main, p1, p2]);
+
+        assert_eq!(d.elements_by_class("card"), vec![p1, p2]);
+        assert_eq!(d.elements_by_class("card destaque"), vec![p1]);
+        assert_eq!(d.elements_by_class("  "), Vec::<NodeId>::new());
+
+        d.set_text_content(p1, "primeiro");
+        assert_eq!(d.text_content(p1), "primeiro");
+        // Atualização repetida reaproveita o único nó de texto
+        let nodes_before = d.len();
+        d.set_text_content(p1, "segundo");
+        assert_eq!(d.text_content(p1), "segundo");
+        assert_eq!(d.len(), nodes_before);
+
+        d.set_text_content(main, "limpo");
+        assert_eq!(d.text_content(main), "limpo");
+        assert_eq!(d.children(main).count(), 1);
+        assert_eq!(d.get_element_by_id("principal"), Some(main));
+
+        d.set_text_content(main, "");
+        assert_eq!(d.text_content(main), "");
+        assert_eq!(d.children(main).count(), 0);
     }
 }

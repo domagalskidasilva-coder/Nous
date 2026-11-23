@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeBuilderOpts, TreeSink};
 use html5ever::{Attribute, ParseOpts, QualName, parse_document};
-use nous_dom::{Document, ElementData, NodeData, NodeId};
+use nous_dom::{DoctypeData, Document, ElementData, NodeData, NodeId};
 
 /// Analisa um documento HTML completo.
 ///
@@ -45,7 +45,9 @@ impl TreeSink for Sink {
     type ElemName<'a> = Ref<'a, QualName>;
 
     fn finish(self) -> Document {
-        self.doc.into_inner()
+        let mut doc = self.doc.into_inner();
+        doc.compact();
+        doc
     }
 
     fn parse_error(&self, _msg: Cow<'static, str>) {
@@ -82,14 +84,14 @@ impl TreeSink for Sink {
     fn create_comment(&self, text: StrTendril) -> NodeId {
         self.doc
             .borrow_mut()
-            .create(NodeData::Comment(text.to_string()))
+            .create(NodeData::Comment(Box::from(&*text)))
     }
 
     fn create_pi(&self, _target: StrTendril, data: StrTendril) -> NodeId {
         // Instruções de processamento só existem em XML; no HTML viram comentários.
         self.doc
             .borrow_mut()
-            .create(NodeData::Comment(data.to_string()))
+            .create(NodeData::Comment(Box::from(&*data)))
     }
 
     fn append(&self, parent: &NodeId, child: NodeOrText<NodeId>) {
@@ -121,9 +123,9 @@ impl TreeSink for Sink {
         _system_id: StrTendril,
     ) {
         let mut doc = self.doc.borrow_mut();
-        let id = doc.create(NodeData::Doctype {
-            name: name.to_string(),
-        });
+        let id = doc.create(NodeData::Doctype(Box::new(DoctypeData {
+            name: Box::from(&*name),
+        })));
         doc.append(NodeId::DOCUMENT, id);
     }
 
@@ -293,5 +295,18 @@ mod tests {
         let sem = parse_html_with_scripting("<body><noscript><p>sem js</p></noscript>", false);
         let ns = sem.find_element(&local_name!("noscript")).unwrap();
         assert_eq!(element_names(&sem, ns), vec!["p"]);
+    }
+
+    #[test]
+    fn parse_compacta_capacidade() {
+        let mut html = String::from("<!DOCTYPE html><html><body>");
+        for i in 0..50 {
+            html.push_str(&format!("<p id=\"p{i}\" class=\"a b\" data-x=\"1\">texto {i}</p>"));
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse_html(&html);
+        let before = doc.approx_heap_bytes();
+        doc.compact();
+        assert_eq!(doc.approx_heap_bytes(), before);
     }
 }

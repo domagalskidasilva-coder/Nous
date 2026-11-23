@@ -6,6 +6,13 @@
 //!   (`rustls-platform-verifier`).
 //! - Um runtime `tokio` pequeno e só da rede (2 threads), compartilhado por todas as abas.
 //! - Esquemas `http`, `https`, `file` e `data`.
+//! - Bloqueador nativo de rastreadores/telemetria e cache LRU em memória limitado em bytes.
+
+pub mod blocker;
+pub mod cache;
+
+pub use blocker::TrackerBlocker;
+pub use cache::ResponseCache;
 
 use std::fmt;
 use std::future::Future;
@@ -14,6 +21,22 @@ use std::time::Duration;
 
 use encoding_rs::{Encoding, UTF_8};
 pub use url::Url;
+
+/// Configuração do cliente de rede.
+#[derive(Clone, Debug)]
+pub struct NetConfig {
+    pub block_trackers: bool,
+    pub cache_budget_bytes: usize,
+}
+
+impl Default for NetConfig {
+    fn default() -> Self {
+        NetConfig {
+            block_trackers: true,
+            cache_budget_bytes: ResponseCache::DEFAULT_BUDGET_BYTES,
+        }
+    }
+}
 
 /// Tamanho máximo de uma resposta (protege a memória contra respostas gigantes).
 pub const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -32,6 +55,8 @@ pub enum NetError {
     Timeout,
     /// Resposta maior que [`MAX_BODY_BYTES`].
     TooLarge,
+    /// Requisição barrada pelo bloqueador nativo de rastreadores.
+    Blocked(String),
     /// Outro erro HTTP.
     Http(String),
     /// Erro lendo arquivo local.
@@ -51,6 +76,7 @@ impl fmt::Display for NetError {
                 "a resposta passou do limite de {} MB",
                 MAX_BODY_BYTES / (1024 * 1024)
             ),
+            NetError::Blocked(u) => write!(f, "bloqueado pelo filtro de rastreadores: {u}"),
             NetError::Http(m) => write!(f, "erro de rede: {m}"),
             NetError::Io(e) => write!(f, "erro ao ler o arquivo: {e}"),
         }
@@ -179,6 +205,8 @@ struct Inner {
     runtime: Option<tokio::runtime::Runtime>,
     client: reqwest::Client,
     user_agent: String,
+    blocker: TrackerBlocker,
+    cache: ResponseCache,
 }
 
 impl Inner {
@@ -207,6 +235,10 @@ pub struct NetClient {
 
 impl NetClient {
     pub fn new(user_agent: &str) -> Result<NetClient, NetError> {
+        Self::with_config(user_agent, NetConfig::default())
+    }
+
+    pub fn with_config(user_agent: &str, config: NetConfig) -> Result<NetClient, NetError> {
         // O reqwest está compilado sem provedor de criptografia: instalamos o `ring`.
         // Se outro código já instalou um provedor, mantemos o que existe.
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -251,12 +283,46 @@ impl NetClient {
                 runtime: Some(runtime),
                 client,
                 user_agent: user_agent.to_owned(),
+                blocker: TrackerBlocker::new(config.block_trackers),
+                cache: ResponseCache::new(config.cache_budget_bytes),
             }),
         })
     }
 
     pub fn user_agent(&self) -> &str {
         &self.inner.user_agent
+    }
+
+    pub fn blocker(&self) -> &TrackerBlocker {
+        &self.inner.blocker
+    }
+
+    pub fn set_blocker_enabled(&self, enabled: bool) {
+        self.inner.blocker.set_enabled(enabled);
+    }
+
+    pub fn is_blocker_enabled(&self) -> bool {
+        self.inner.blocker.is_enabled()
+    }
+
+    pub fn blocked_count(&self) -> u64 {
+        self.inner.blocker.blocked_count()
+    }
+
+    pub fn cache(&self) -> &ResponseCache {
+        &self.inner.cache
+    }
+
+    pub fn cache_bytes(&self) -> usize {
+        self.inner.cache.used_bytes()
+    }
+
+    pub fn purge_cache(&self) {
+        self.inner.cache.clear();
+    }
+
+    pub fn set_cache_budget(&self, budget_bytes: usize) {
+        self.inner.cache.set_budget(budget_bytes);
     }
 
     /// Roda uma tarefa no runtime da rede (sem esperar por ela).
@@ -276,12 +342,22 @@ impl NetClient {
     /// Busca uma URL inteira. Pode ser aguardado de qualquer executor: o trabalho de
     /// rede roda sempre no runtime interno.
     pub async fn fetch(&self, url: &Url) -> Result<Response, NetError> {
+        if self.inner.blocker.check(url) {
+            return Err(NetError::Blocked(url.to_string()));
+        }
         match url.scheme() {
             "http" | "https" => {
+                if let Some(cached) = self.inner.cache.get(url) {
+                    return Ok(cached);
+                }
                 let client = self.inner.client.clone();
-                let url = url.clone();
-                let task = self.inner.runtime().spawn(fetch_http(client, url));
-                task.await.map_err(|e| NetError::Http(e.to_string()))?
+                let req_url = url.clone();
+                let task = self.inner.runtime().spawn(fetch_http(client, req_url));
+                let resp = task.await.map_err(|e| NetError::Http(e.to_string()))??;
+                if resp.is_success() {
+                    self.inner.cache.insert(url, resp.clone());
+                }
+                Ok(resp)
             }
             "file" => {
                 let url = url.clone();
@@ -294,6 +370,41 @@ impl NetClient {
             "data" => fetch_data(url),
             other => Err(NetError::UnsupportedScheme(other.to_owned())),
         }
+    }
+
+    /// Busca várias URLs em paralelo respeitando o limite `max_concurrent` via semáforo,
+    /// devolvendo os resultados na mesma ordem da entrada.
+    pub async fn fetch_many(
+        &self,
+        urls: Vec<Url>,
+        max_concurrent: usize,
+    ) -> Vec<Result<Response, NetError>> {
+        if urls.is_empty() {
+            return Vec::new();
+        }
+        let limit = max_concurrent.max(1);
+        let sem = Arc::new(tokio::sync::Semaphore::new(limit));
+        let mut handles = Vec::with_capacity(urls.len());
+        for url in urls {
+            let net = self.clone();
+            let sem = Arc::clone(&sem);
+            let handle = self.inner.runtime().spawn(async move {
+                let _permit = sem
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| NetError::Http(e.to_string()))?;
+                net.fetch(&url).await
+            });
+            handles.push(handle);
+        }
+        let mut out = Vec::with_capacity(handles.len());
+        for handle in handles {
+            match handle.await {
+                Ok(res) => out.push(res),
+                Err(e) => out.push(Err(NetError::Http(e.to_string()))),
+            }
+        }
+        out
     }
 }
 
@@ -527,6 +638,101 @@ mod tests {
             c.block_on(c.fetch(&ftp)),
             Err(NetError::UnsupportedScheme(_))
         ));
+    }
+
+    #[test]
+    fn bloqueador_e_cache_no_cliente() {
+        let c = NetClient::with_config(
+            "Nous/teste",
+            NetConfig {
+                block_trackers: true,
+                cache_budget_bytes: 1024,
+            },
+        )
+        .unwrap();
+        assert!(c.is_blocker_enabled());
+        assert_eq!(c.blocked_count(), 0);
+        assert_eq!(c.cache_bytes(), 0);
+
+        let tracker = Url::parse("https://www.google-analytics.com/analytics.js").unwrap();
+        assert!(matches!(
+            c.block_on(c.fetch(&tracker)),
+            Err(NetError::Blocked(_))
+        ));
+        assert_eq!(c.blocked_count(), 1);
+
+        c.set_blocker_enabled(false);
+        assert!(!c.is_blocker_enabled());
+
+        // Cache direto via cache() para testar cache_bytes / set_cache_budget / purge_cache sem rede externa
+        let u1 = Url::parse("https://exemplo.test/a.css").unwrap();
+        let u2 = Url::parse("https://exemplo.test/b.css").unwrap();
+        c.cache().insert(
+            &u1,
+            Response {
+                url: u1.clone(),
+                status: 200,
+                content_type: Some("text/css".into()),
+                body: vec![b'x'; 600],
+            },
+        );
+        assert_eq!(c.cache_bytes(), 600);
+        // Hit em cache mesmo offline
+        let cached = c.block_on(c.fetch(&u1)).unwrap();
+        assert_eq!(cached.body.len(), 600);
+
+        c.cache().insert(
+            &u2,
+            Response {
+                url: u2.clone(),
+                status: 200,
+                content_type: Some("text/css".into()),
+                body: vec![b'y'; 600],
+            },
+        );
+        assert!(c.cache_bytes() <= 1024);
+        c.set_cache_budget(500);
+        assert!(c.cache_bytes() <= 500);
+        c.purge_cache();
+        assert_eq!(c.cache_bytes(), 0);
+    }
+
+    #[test]
+    fn fetch_many_paralelo_e_ordenado() {
+        let dir = std::env::temp_dir().join(format!("nous-net-many-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p1 = dir.join("um.css");
+        let p2 = dir.join("dois.js");
+        std::fs::write(&p1, "body { margin: 0; }").unwrap();
+        std::fs::write(&p2, "console.log(1);").unwrap();
+
+        let urls = vec![
+            Url::parse("data:text/plain,primeiro").unwrap(),
+            Url::from_file_path(&p1).unwrap(),
+            Url::parse("https://doubleclick.net/ad.js").unwrap(),
+            Url::from_file_path(&p2).unwrap(),
+            Url::parse("data:text/html;base64,PGI+b2k8L2I+").unwrap(),
+            Url::from_file_path(dir.join("faltando.txt")).unwrap(),
+        ];
+
+        let c = client();
+        assert!(c.block_on(c.fetch_many(vec![], 4)).is_empty());
+
+        let results = c.block_on(c.fetch_many(urls, 2));
+        assert_eq!(results.len(), 6);
+        assert_eq!(results[0].as_ref().unwrap().text(), "primeiro");
+        assert_eq!(results[1].as_ref().unwrap().text(), "body { margin: 0; }");
+        assert_eq!(
+            results[1].as_ref().unwrap().mime().as_deref(),
+            Some("text/css")
+        );
+        assert!(matches!(results[2], Err(NetError::Blocked(_))));
+        assert_eq!(results[3].as_ref().unwrap().text(), "console.log(1);");
+        assert_eq!(results[4].as_ref().unwrap().text(), "<b>oi</b>");
+        assert!(matches!(results[5], Err(NetError::Io(_))));
+        assert_eq!(c.blocked_count(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
