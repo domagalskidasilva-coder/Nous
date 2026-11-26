@@ -1345,6 +1345,7 @@ input:focus-visible {
   min-width: 0;
   min-height: 0;
   display: flex;
+  background: var(--bg-frame);
 }
 
 #pages > browser {
@@ -1354,6 +1355,7 @@ input:focus-visible {
   min-width: 0;
   min-height: 0;
   border: 0;
+  background: var(--bg-frame);
 }
 
 #pages > browser[hidden] {
@@ -1645,6 +1647,51 @@ input:focus-visible {
   pointer-events: none;
 }
 
+/* Kanso Floating Site Permission Bar */
+.permission-bar {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  max-width: min(560px, calc(100% - 32px));
+  padding: 10px 14px 10px 18px;
+  border-radius: var(--radius-md);
+  background: var(--bg-popover);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg);
+  z-index: 82;
+}
+
+.perm-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.perm-host {
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.perm-msg {
+  font-size: 12.5px;
+  color: var(--text);
+  line-height: 1.35;
+}
+
+.perm-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 /* ==========================================================================
    Native Internal Views — Kanso Zen Canvas (0 content-process RAM)
    ========================================================================== */
@@ -1677,7 +1724,49 @@ input:focus-visible {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 28px 40px 24px;
+  padding: 24px 40px 24px;
+}
+
+.kanso-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 28px;
+}
+
+.kanso-account-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  transition: border-color var(--t-fast), color var(--t-fast), background var(--t-fast);
+}
+
+.kanso-account-pill:hover {
+  border-color: var(--accent);
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.kanso-account-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.kanso-account-pill.connected .kanso-account-dot {
+  background: var(--accent);
 }
 
 .kanso-center {

@@ -28,6 +28,9 @@ export class NousContentParent extends JSWindowActorParent {
       case "Nous:DOMFullscreen:Painted":
         chromeWin.NousChromeBridge.onDOMFullscreenPainted(browser);
         break;
+      case "Nous:MediaRequest":
+        chromeWin.NousChromeBridge.onMediaRequest(browser, message.data, this);
+        break;
     }
   }
 }

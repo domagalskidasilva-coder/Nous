@@ -16,6 +16,7 @@
 <head>
   <meta charset="utf-8" />
   <title>Nous</title>
+  <link rel="icon" href="chrome://nous/content/icons/default/nous-window.ico" />
   <link rel="stylesheet" href="chrome://global/skin/global.css" />
   <link rel="stylesheet" href="chrome://nous/content/window.css" />
   <script src="chrome://nous/content/blocker.js" defer="defer"></script>
@@ -258,6 +259,18 @@
           </button>
         </div>
 
+        <!-- Kanso Site Permission Prompt Bar (Camera / Mic / Notifications / Location) -->
+        <div id="permission-bar" class="permission-bar" hidden="hidden" role="alertdialog" aria-label="Solicitação de permissão do site">
+          <div class="perm-copy">
+            <span id="perm-host" class="perm-host mono"></span>
+            <span id="perm-msg" class="perm-msg"></span>
+          </div>
+          <div class="perm-actions">
+            <button id="btn-perm-deny" class="btn-ghost" type="button">Bloquear</button>
+            <button id="btn-perm-allow" class="btn-primary" type="button">Permitir</button>
+          </div>
+        </div>
+
         <!-- Bottom-Left Whisper-Quiet Link Hover Preview -->
         <div id="link-hover-pill" class="link-hover-pill mono" hidden="hidden"></div>
 
@@ -341,6 +354,14 @@
     <div class="popover-divider"></div>
 
     <div class="popover-list">
+      <button class="menu-row" data-menu-action="google-account" type="button">
+        <span>Conta Google</span>
+        <span class="menu-pill" id="menu-google-state">Entrar</span>
+      </button>
+      <button class="menu-row" data-menu-action="toggle-dark-web" type="button">
+        <span>Modo escuro em sites</span>
+        <span class="menu-pill" id="menu-darkweb-state">Auto</span>
+      </button>
       <button class="menu-row" data-menu-action="toggle-blocker" type="button">
         <span>Bloqueador de rastreadores</span>
         <span class="menu-pill" id="menu-blocker-state">Ativo</span>

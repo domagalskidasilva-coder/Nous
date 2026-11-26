@@ -193,6 +193,26 @@
       })
     );
 
+    const googleSigned = Boolean(api.isGoogleSignedIn && api.isGoogleSignedIn());
+
+    const topBar = el(
+      "div",
+      { className: "kanso-topbar" },
+      el(
+        "button",
+        {
+          className: `kanso-account-pill${googleSigned ? " connected" : ""}`,
+          type: "button",
+          title: googleSigned
+            ? "Sua Conta Google está conectada — clique para gerenciar"
+            : "Entrar na sua Conta Google diretamente sem precisar abrir outro site",
+          onClick: () => api.openGoogleAccount(),
+        },
+        el("span", { className: "kanso-account-dot" }),
+        el("span", { textContent: googleSigned ? "Conta Google" : "Entrar · Google ↗" })
+      )
+    );
+
     const footer = el(
       "footer",
       { className: "kanso-footer" },
@@ -244,7 +264,7 @@
     const shell = el(
       "div",
       { className: "kanso-shell" },
-      el("div", {}),
+      topBar,
       el(
         "div",
         { className: "kanso-center" },
@@ -595,6 +615,18 @@
             ],
             cfg.theme,
             v => api.setTheme(v)
+          )
+        ),
+        makeRow(
+          "Modo escuro em sites",
+          "Mantém todos os sites escuros automaticamente quando você usa um tema escuro.",
+          makeSegment(
+            [
+              { value: true, label: "Auto" },
+              { value: false, label: "Desligado" },
+            ],
+            cfg.forceDarkWeb,
+            v => api.setForceDarkWeb(v)
           )
         ),
         makeRow(

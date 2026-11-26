@@ -6,7 +6,15 @@ pref("toolkit.defaultChromeURI", "chrome://nous/content/window.xhtml");
 pref("toolkit.defaultChromeFeatures", "chrome,dialog=no,resizable,all");
 pref("browser.tabs.remote.autostart", true);
 pref("browser.tabs.inTitlebar", 1);
+pref("general.useragent.compatMode.firefox", true);
+pref("taskbar.grouping.useprofile", false);
+
+// Dark-first rendering for chrome and web content (zero white flashes)
 pref("ui.systemUsesDarkTheme", 1);
+pref("browser.in-content.dark-mode", true);
+pref("layout.css.prefers-color-scheme.content-override", 0);
+pref("browser.display.background_color", "#141413");
+pref("browser.display.foreground_color", "#e8e5de");
 
 // ---------------------------------------------------------------------------
 // 1. Lean Process Architecture (1 process on startup; 1 sandboxed web child)
@@ -161,11 +169,11 @@ pref("network.connectivity-service.enabled", false);
 pref("network.captive-portal-service.enabled", false);
 pref("beacon.enabled", false);
 pref("dom.push.enabled", false);
-pref("geo.enabled", false);
+pref("geo.enabled", true);
 pref("dom.battery.enabled", false);
 pref("media.webspeech.synth.enabled", false);
 pref("media.webspeech.recognition.enable", false);
-pref("media.autoplay.default", 5);
+pref("media.autoplay.default", 1);
 pref("privacy.donottrackheader.enabled", true);
 pref("privacy.globalprivacycontrol.enabled", true);
 pref("dom.security.https_first", true);
@@ -181,5 +189,7 @@ pref("nous.density", "normal");          // compact | normal
 pref("nous.perfProfile", "eco");         // eco | balanced | turbo
 pref("nous.searchEngine", "duckduckgo"); // duckduckgo | google | brave | startpage
 pref("nous.blocker.enabled", true);
+pref("nous.forceDarkWeb", true);         // smart luminance-aware dark mode for bright sites
+pref("nous.darkWebExclude", "");         // comma-separated hosts excluded from adaptive dark
 pref("nous.hibernation.minutes", 2);     // 0 disables auto-hibernation
 pref("nous.animations.enabled", true);

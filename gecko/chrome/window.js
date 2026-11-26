@@ -68,10 +68,10 @@
   };
 
   const DEFAULT_BOOKMARKS = [
-    { title: "Wikipédia", url: "https://pt.wikipedia.org" },
-    { title: "GitHub", url: "https://github.com" },
+    { title: "Google", url: "https://www.google.com" },
     { title: "YouTube", url: "https://www.youtube.com" },
-    { title: "DuckDuckGo", url: "https://duckduckgo.com" },
+    { title: "GitHub", url: "https://github.com" },
+    { title: "Wikipédia", url: "https://pt.wikipedia.org" },
     { title: "MDN Web Docs", url: "https://developer.mozilla.org" },
     { title: "Hacker News", url: "https://news.ycombinator.com" },
   ];
@@ -287,6 +287,7 @@
     perfProfile: getStrPref("nous.perfProfile", "eco"),
     searchEngine: getStrPref("nous.searchEngine", "duckduckgo"),
     blockerEnabled: getBoolPref("nous.blocker.enabled", true),
+    forceDarkWeb: getBoolPref("nous.forceDarkWeb", true),
     hibernateMinutes: getIntPref("nous.hibernation.minutes", 2),
     animations: getBoolPref("nous.animations.enabled", true),
     sidebarCollapsed: false,
@@ -359,7 +360,7 @@
     if (internal) {
       return internal;
     }
-    if (/^https?:\/\//i.test(value)) {
+    if (/^(?:https?|file):\/\//i.test(value)) {
       return new URL(value).href;
     }
     if (/^(?:about:|view-source:)/i.test(value)) {
@@ -467,6 +468,9 @@
   function attachBrowser(tab, openWindowInfo = null) {
     if (tab.browser) return tab.browser;
 
+    // Lazily warm up Gecko Downloads listener only on first web tab (0 MB on nous://nova-aba startup)
+    window.NousDownloads?.ensureInitialized();
+
     const browser = document.createXULElement("browser");
     browser.setAttribute("type", "content");
     browser.setAttribute("remote", "true");
@@ -537,6 +541,7 @@
     );
 
     browser.addEventListener("DOMTitleChanged", () => syncTabMetadata(tab));
+    browser.addEventListener("DOMWindowClose", () => closeTab(tab));
     browser.addEventListener("DOMAudioPlaybackStarted", () => {
       tab.audioPlaying = true;
       renderTabs();
@@ -684,7 +689,7 @@
     const uri = Services.io.newURI(url);
     const loadFlags = bypassCache ? Ci.nsIWebNavigation.LOAD_FLAGS_BYPASS_CACHE : 0;
     browser.loadURI(uri, {
-      triggeringPrincipal: SECURITY.createNullPrincipal({}),
+      triggeringPrincipal: SECURITY.getSystemPrincipal(),
       loadFlags,
     });
     if (recordNav) {
@@ -1425,6 +1430,66 @@
   // -------------------------------------------------------------------------
   // Theme, Layout, Density, Performance Profile & Zen Mode
   // -------------------------------------------------------------------------
+  function isGoogleSignedIn() {
+    try {
+      const cookies = Services.cookies.getCookiesFromHost("google.com", {});
+      for (const c of cookies) {
+        if (c.name === "SID" || c.name === "SAPISID" || c.name === "__Secure-1PSID" || c.name === "__Secure-3PSID") {
+          return true;
+        }
+      }
+    } catch {}
+    return false;
+  }
+
+  function openGoogleAccount() {
+    const target = isGoogleSignedIn()
+      ? "https://myaccount.google.com/"
+      : "https://accounts.google.com/ServiceLogin";
+    if (activeTab && isInternalUrl(activeTab.url)) {
+      navigateActive(target);
+    } else {
+      createTab(target, { activate: true });
+    }
+  }
+
+  function getDarkWebExclusions() {
+    const raw = getStrPref("nous.darkWebExclude", "");
+    return new Set(raw.split(",").map(s => s.trim().toLowerCase()).filter(Boolean));
+  }
+
+  function isDarkWebExcluded(host) {
+    const h = String(host || "").toLowerCase().replace(/^www\./, "");
+    return Boolean(h && getDarkWebExclusions().has(h));
+  }
+
+  function toggleDarkWebForHost(host) {
+    const h = String(host || "").toLowerCase().replace(/^www\./, "");
+    if (!h) return;
+    const set = getDarkWebExclusions();
+    if (set.has(h)) set.delete(h);
+    else set.add(h);
+    setPref("nous.darkWebExclude", Array.from(set).join(","));
+    broadcastDarkWebUpdate();
+  }
+
+  function broadcastDarkWebUpdate() {
+    for (const tab of tabs) {
+      try {
+        const actor = tab.browser?.browsingContext?.currentWindowGlobal?.getActor("NousContent");
+        actor?.sendAsyncMessage("Nous:UpdateDarkWeb", {});
+      } catch {}
+    }
+  }
+
+  function setForceDarkWeb(enabled) {
+    config.forceDarkWeb = Boolean(enabled);
+    setPref("nous.forceDarkWeb", config.forceDarkWeb);
+    applyVisualConfig();
+    broadcastDarkWebUpdate();
+    showToast(config.forceDarkWeb ? "Modo escuro adaptativo em sites ativado" : "Modo escuro forçado em sites desativado");
+  }
+
   function applyVisualConfig() {
     const root = document.documentElement;
     root.dataset.theme = config.theme;
@@ -1435,8 +1500,13 @@
     root.dataset.sidebarCollapsed = config.sidebarCollapsed ? "true" : "false";
     root.dataset.zen = config.zen ? "true" : "false";
 
-    // Sync Gecko dark/light content theme preference with chosen UI theme
-    setPref("ui.systemUsesDarkTheme", config.theme === "washi" ? 0 : 1);
+    // Sync Gecko native dark/light content preferences (0 = Force Dark, 1 = Force Light)
+    const isLight = config.theme === "washi";
+    setPref("ui.systemUsesDarkTheme", isLight ? 0 : 1);
+    setPref("browser.in-content.dark-mode", !isLight);
+    setPref("layout.css.prefers-color-scheme.content-override", isLight ? 1 : 0);
+    setPref("browser.display.background_color", isLight ? "#f5f2ec" : "#141413");
+    setPref("browser.display.foreground_color", isLight ? "#1c1b18" : "#e8e5de");
 
     // Sync popover active states
     document.querySelectorAll("[data-set-theme]").forEach(btn => {
@@ -1453,9 +1523,24 @@
     blockerState.textContent = config.blockerEnabled ? "Ativo" : "Pausado";
     blockerState.classList.toggle("off", !config.blockerEnabled);
 
+    const darkWebState = byId("menu-darkweb-state");
+    if (darkWebState) {
+      const activeDark = !isLight && config.forceDarkWeb;
+      darkWebState.textContent = isLight ? "Claro" : activeDark ? "Auto" : "Off";
+      darkWebState.classList.toggle("off", !activeDark);
+    }
+
+    const googleState = byId("menu-google-state");
+    if (googleState) {
+      const signed = isGoogleSignedIn();
+      googleState.textContent = signed ? "Conectado" : "Entrar";
+      googleState.classList.toggle("off", !signed);
+    }
+
     byId("btn-sidebar-nav")?.classList.toggle("active", config.layout === "sidebar");
     byId("btn-zen")?.classList.toggle("active", config.zen);
 
+    broadcastDarkWebUpdate();
     renderTabs(true);
     syncToolbarForActive();
   }
@@ -1587,9 +1672,11 @@
         parent: { esModuleURI: "resource://nous/actors/NousContentParent.sys.mjs" },
         child: {
           esModuleURI: "resource://nous/actors/NousContentChild.sys.mjs",
+          observers: ["getUserMedia:request"],
           events: {
             DOMContentLoaded: { capture: true },
             pageshow: { capture: true },
+            load: { capture: true },
             DOMLinkAdded: {},
             mouseover: {},
             mouseout: {},
@@ -1733,6 +1820,43 @@
     }
   }
 
+  const permissionQueue = [];
+  let activePermissionPrompt = null;
+
+  function renderPermissionPrompt() {
+    const bar = byId("permission-bar");
+    if (!bar) return;
+    if (!activePermissionPrompt) {
+      activePermissionPrompt = permissionQueue.shift() || null;
+    }
+    if (!activePermissionPrompt) {
+      bar.hidden = true;
+      return;
+    }
+    byId("perm-host").textContent = activePermissionPrompt.host || "SITE";
+    byId("perm-msg").textContent = activePermissionPrompt.message || "solicita permissão.";
+    bar.hidden = false;
+  }
+
+  function enqueuePermissionPrompt(promptObj) {
+    permissionQueue.push(promptObj);
+    if (!activePermissionPrompt) {
+      renderPermissionPrompt();
+    }
+  }
+
+  function resolvePermissionPrompt(allow) {
+    const current = activePermissionPrompt;
+    activePermissionPrompt = null;
+    if (current) {
+      try {
+        if (allow) current.onAllow?.();
+        else current.onDeny?.();
+      } catch {}
+    }
+    renderPermissionPrompt();
+  }
+
   window.NousChromeBridge = {
     onFavicon(browser, data) {
       if (!data?.iconUrl) return;
@@ -1778,6 +1902,20 @@
       exitDOMFullscreen();
     },
     onDOMFullscreenPainted() {},
+    onMediaRequest(_browser, data, actor) {
+      if (!data?.callID) return;
+      const parts = [];
+      if (data.screen) parts.push("Compartilhamento de tela");
+      if (data.video) parts.push("Câmera");
+      if (data.audio) parts.push("Microfone");
+      const what = parts.length ? parts.join(" e ") : "mídia";
+      enqueuePermissionPrompt({
+        host: data.host || "Este site",
+        message: `solicita acesso a ${what}.`,
+        onAllow: () => actor?.sendAsyncMessage("Nous:MediaResponse", { callID: data.callID, allow: true }),
+        onDeny: () => actor?.sendAsyncMessage("Nous:MediaResponse", { callID: data.callID, allow: false }),
+      });
+    },
   };
 
   // -------------------------------------------------------------------------
@@ -1861,6 +1999,23 @@
         });
         body.append(pr);
       }
+
+      const darkEx = isDarkWebExcluded(host);
+      const darkRow = document.createElementNS(HTML_NS, "button");
+      darkRow.type = "button";
+      darkRow.className = "menu-row";
+      const dLbl = document.createElementNS(HTML_NS, "span");
+      dLbl.textContent = "Escuro adaptativo neste site";
+      const dPill = document.createElementNS(HTML_NS, "span");
+      dPill.className = `menu-pill${darkEx || !config.forceDarkWeb ? " off" : ""}`;
+      dPill.textContent = darkEx ? "Desativado" : config.forceDarkWeb ? "Auto" : "Global off";
+      darkRow.append(dLbl, dPill);
+      darkRow.addEventListener("click", () => {
+        toggleDarkWebForHost(host);
+        showToast(!darkEx ? `Escuro adaptativo desativado em ${host}` : `Escuro adaptativo reativado em ${host}`);
+        toggleSitePopover(false);
+      });
+      body.append(darkRow);
 
       const clrRow = document.createElementNS(HTML_NS, "button");
       clrRow.type = "button";
@@ -2297,6 +2452,9 @@
     setPerfProfile,
     setHibernateMinutes,
     setBlockerEnabled,
+    setForceDarkWeb,
+    isGoogleSignedIn,
+    openGoogleAccount,
     setSearchEngine,
   };
 
@@ -2383,8 +2541,11 @@
       if (pb) pb.hidden = false;
     }
 
-    // Subscribe to native Gecko Downloads lazily
+    // Subscribe to native Gecko Downloads lazily & install Kanso permission prompt handler
     window.NousDownloads.subscribe(syncDownloadsUi);
+    window.NousPermissions?.installPromptHandler(enqueuePermissionPrompt);
+    byId("btn-perm-allow")?.addEventListener("click", () => resolvePermissionPrompt(true));
+    byId("btn-perm-deny")?.addEventListener("click", () => resolvePermissionPrompt(false));
 
     // Install lightweight tracker blocker
     window.NousBlocker.install(config.blockerEnabled);
@@ -2470,7 +2631,44 @@
       e.stopPropagation();
       toggleSitePopover(false);
       toggleDownloadsPopover(false);
+      const g = byId("menu-google-state");
+      if (g) {
+        const signed = isGoogleSignedIn();
+        g.textContent = signed ? "Conectado" : "Entrar";
+        g.classList.toggle("off", !signed);
+      }
       togglePopover();
+    });
+
+    // Horizontal wheel scrolling on single-bar tabstrip
+    byId("tabs-top")?.addEventListener("wheel", e => {
+      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+        e.currentTarget.scrollLeft += e.deltaY;
+      }
+    }, { passive: true });
+
+    // Drag & drop URLs or local files (.html / .pdf / images) onto window
+    byId("app-shell")?.addEventListener("dragover", e => {
+      if (e.dataTransfer?.types && !e.dataTransfer.types.includes("text/x-nous-tab")) {
+        e.preventDefault();
+      }
+    });
+    byId("app-shell")?.addEventListener("drop", e => {
+      if (e.dataTransfer?.types?.includes("text/x-nous-tab")) return;
+      const files = e.dataTransfer?.files;
+      if (files && files.length > 0 && files[0].mozFullPath) {
+        e.preventDefault();
+        const p = files[0].mozFullPath.replace(/\\/g, "/");
+        createTab(`file:///${p}`, { activate: true });
+        return;
+      }
+      const droppedUrl = e.dataTransfer?.getData("text/uri-list") || e.dataTransfer?.getData("text/plain") || "";
+      if (droppedUrl.trim()) {
+        e.preventDefault();
+        try {
+          createTab(resolveInput(droppedUrl.split(/\r?\n/)[0]), { activate: true });
+        } catch {}
+      }
     });
 
     // Clear browsing data modal
@@ -2550,6 +2748,21 @@
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         moveOmniboxSelection(-1);
+      } else if (e.key === "Enter" && e.altKey) {
+        e.preventDefault();
+        hideOmniboxDropdown();
+        try {
+          createTab(resolveInput(addr.value), { activate: true });
+        } catch {}
+      } else if (e.key === "Enter" && e.ctrlKey) {
+        e.preventDefault();
+        hideOmniboxDropdown();
+        const raw = addr.value.trim();
+        if (raw && !raw.includes("://") && !raw.includes(" ")) {
+          navigateActive(`https://www.${raw.replace(/\.com$/i, "")}.com`);
+        } else {
+          navigateActive(raw);
+        }
       } else if (e.key === "Escape") {
         hideOmniboxDropdown();
         addr.value = activeTab?.url === "nous://nova-aba" ? "" : (activeTab?.url || "");
@@ -2588,6 +2801,8 @@
         const act = btn.dataset.menuAction;
         togglePopover(false);
         if (act === "toggle-blocker") setBlockerEnabled(!config.blockerEnabled);
+        else if (act === "google-account") openGoogleAccount();
+        else if (act === "toggle-dark-web") setForceDarkWeb(!config.forceDarkWeb);
         else if (act === "new-window") openNewWindow(false);
         else if (act === "private-window") openNewWindow(true);
         else if (act === "open-downloads") {
@@ -2689,6 +2904,8 @@
       if (key === "escape") {
         if (document.documentElement.dataset.domFullscreen === "true") {
           exitDOMFullscreen();
+        } else if (activePermissionPrompt) {
+          resolvePermissionPrompt(false);
         } else if (!byId("palette-backdrop").hidden) {
           closeTabPalette();
         } else if (!byId("clear-data-backdrop").hidden) {
@@ -2825,6 +3042,7 @@
     window.addEventListener("unload", () => {
       saveSessionNow();
       window.NousBlocker.uninstall();
+      window.NousPermissions?.uninstallPromptHandler();
     });
 
     // Read RAM before first internal page render so initial paint never displays "— MB".
@@ -2879,7 +3097,7 @@
                 const contentSnap = await activeTab.browser.browsingContext.currentWindowGlobal.drawSnapshot(
                   new DOMRect(0, 0, r.width, r.height),
                   1,
-                  "#ffffff"
+                  bg
                 );
                 ctx.drawImage(contentSnap, r.left, r.top, r.width, r.height);
                 contentSnap.close();

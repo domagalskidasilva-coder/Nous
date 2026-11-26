@@ -10,9 +10,11 @@
     "screen": "Compartilhamento de tela",
     "desktop-notification": "Notificações",
     "geo": "Localização",
+    "geolocation": "Localização",
     "clipboard-read": "Área de transferência",
     "autoplay-media": "Reprodução automática",
     "persistent-storage": "Armazenamento persistente",
+    "midi": "Dispositivos MIDI",
   };
 
   function principalForUrl(url) {
@@ -107,11 +109,93 @@
     return PERMISSION_LABELS[type] || type;
   }
 
+  let registeredFactory = null;
+  const PROMPT_CID = Components.ID("{7e8c4512-9a3f-4c2b-81a0-9e7d6c5b4a11}");
+  const PROMPT_CONTRACT = "@mozilla.org/content-permission/prompt;1";
+
+  function installPromptHandler(onPrompt) {
+    if (registeredFactory || typeof onPrompt !== "function") return;
+    try {
+      const promptImpl = {
+        QueryInterface: ChromeUtils.generateQI(["nsIContentPermissionPrompt"]),
+        prompt(request) {
+          try {
+            const principal = request.principal;
+            const types = [];
+            const arr = request.types;
+            for (let i = 0; i < arr.length; i++) {
+              const t = arr.queryElementAt(i, Ci.nsIContentPermissionType);
+              if (t?.type) types.push(t.type);
+            }
+            const primaryType = types[0] || "permission";
+            const permKey = primaryType === "geolocation" ? "geo" : primaryType;
+
+            if (principal) {
+              const existing = Services.perms.testExactPermissionFromPrincipal(principal, permKey);
+              if (existing === Ci.nsIPermissionManager.ALLOW_ACTION) {
+                request.allow();
+                return;
+              }
+              if (existing === Ci.nsIPermissionManager.DENY_ACTION) {
+                request.cancel();
+                return;
+              }
+            }
+
+            const host = (principal?.asciiHost || "").replace(/^www\./, "") || "Este site";
+            const label = types.map(t => labelForPermissionType(t)).join(" e ");
+            onPrompt({
+              host,
+              message: `solicita permissão para ${label}.`,
+              onAllow() {
+                try {
+                  if (principal) {
+                    Services.perms.addFromPrincipal(principal, permKey, Ci.nsIPermissionManager.ALLOW_ACTION);
+                  }
+                  request.allow();
+                } catch {}
+              },
+              onDeny() {
+                try {
+                  request.cancel();
+                } catch {}
+              },
+            });
+          } catch {
+            try {
+              request.cancel();
+            } catch {}
+          }
+        },
+      };
+
+      const factory = {
+        createInstance(iid) {
+          return promptImpl.QueryInterface(iid);
+        },
+      };
+      const registrar = Components.manager.QueryInterface(Ci.nsIComponentRegistrar);
+      registrar.registerFactory(PROMPT_CID, "Nous Content Permission Prompt", PROMPT_CONTRACT, factory);
+      registeredFactory = factory;
+    } catch {}
+  }
+
+  function uninstallPromptHandler() {
+    if (!registeredFactory) return;
+    try {
+      const registrar = Components.manager.QueryInterface(Ci.nsIComponentRegistrar);
+      registrar.unregisterFactory(PROMPT_CID, registeredFactory);
+    } catch {}
+    registeredFactory = null;
+  }
+
   window.NousPermissions = {
     getSitePermissions,
     setSitePermission,
     clearSiteData,
     clearBrowsingData,
     labelForPermissionType,
+    installPromptHandler,
+    uninstallPromptHandler,
   };
 })();
