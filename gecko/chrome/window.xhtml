@@ -1,27 +1,426 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<?xml-stylesheet href="chrome://global/skin/" type="text/css"?>
-<?xml-stylesheet href="chrome://nous/content/window.css" type="text/css"?>
-<window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
-        xmlns:html="http://www.w3.org/1999/xhtml"
-        title="Nous" windowtype="nous:browser" width="1180" height="760"
-        orient="vertical">
-  <html:script src="chrome://nous/content/window.js" defer="defer"></html:script>
-  <html:header class="toolbar">
-    <html:div class="tab-row">
-      <html:span class="brand">Nous</html:span>
-      <html:div id="tabs" role="tablist" aria-label="Abas"></html:div>
-      <html:button id="new-tab" title="Nova aba (Ctrl+T)" aria-label="Nova aba">+</html:button>
-    </html:div>
-    <html:form id="navigation" class="navigation">
-      <html:button id="back" type="button" aria-label="Voltar" title="Voltar">←</html:button>
-      <html:button id="forward" type="button" aria-label="Avançar" title="Avançar">→</html:button>
-      <html:button id="reload" type="button" aria-label="Recarregar" title="Recarregar">↻</html:button>
-      <html:input id="address" type="text" aria-label="Endereço ou pesquisa"
-                  placeholder="Pesquisar ou digitar um endereço"
-                  autocomplete="off" spellcheck="false"/>
-      <html:button id="go" type="submit">Ir</html:button>
-    </html:form>
-    <html:p id="message" role="status" hidden="hidden"></html:p>
-  </html:header>
-  <box id="pages" flex="1"/>
-</window>
+<html id="nous-window"
+      xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      customtitlebar="true"
+      windowtype="nous:browser"
+      width="1280"
+      height="820"
+      sizemode="normal"
+      persist="screenX screenY width height sizemode"
+      data-theme="kanso"
+      data-layout="top"
+      data-density="normal"
+      data-perf="eco"
+      lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <title>Nous</title>
+  <link rel="stylesheet" href="chrome://global/skin/global.css" />
+  <link rel="stylesheet" href="chrome://nous/content/window.css" />
+  <script src="chrome://nous/content/blocker.js" defer="defer"></script>
+  <script src="chrome://nous/content/downloads.js" defer="defer"></script>
+  <script src="chrome://nous/content/permissions.js" defer="defer"></script>
+  <script src="chrome://nous/content/internal-pages.js" defer="defer"></script>
+  <script src="chrome://nous/content/window.js" defer="defer"></script>
+</head>
+<body>
+  <!-- Native Gecko Popupset (enables HTML <select>, date/time & color pickers in remote tabs) -->
+  <xul:popupset id="mainPopupSet"></xul:popupset>
+
+  <div id="zen-hotspot" aria-hidden="true"></div>
+
+  <div id="app-shell">
+    <!-- Kanso Zen Single-Bar Unified Chrome (44px total height) -->
+    <header id="chrome-top" class="drag-region">
+      <div id="single-bar" class="drag-region">
+        <!-- Left: Minimal Navigation + Inline Pill Tabs (hidden when Sidebar layout active) -->
+        <div class="bar-left no-drag">
+          <button id="btn-sidebar-nav" class="icon-btn only-sidebar-layout" type="button" title="Alternar barra lateral (Ctrl+B)" aria-label="Alternar barra lateral">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="2.25" y="3.25" width="13.5" height="11.5" rx="2"/>
+              <line x1="6.75" y1="3.25" x2="6.75" y2="14.75"/>
+            </svg>
+          </button>
+          <button id="btn-back" class="icon-btn" type="button" title="Voltar (Alt+←)" aria-label="Voltar" disabled="disabled">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M11 4.5L6.5 9L11 13.5"/>
+            </svg>
+          </button>
+          <button id="btn-forward" class="icon-btn" type="button" title="Avançar (Alt+→)" aria-label="Avançar" disabled="disabled">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M7 4.5L11.5 9L7 13.5"/>
+            </svg>
+          </button>
+          <button id="btn-reload" class="icon-btn" type="button" title="Recarregar (F5)" aria-label="Recarregar">
+            <svg xmlns="http://www.w3.org/2000/svg" class="ico-reload" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M13.9 9A4.9 4.9 0 1 1 12.5 5.5"/>
+              <path d="M13.9 3.6V6.3H11.2"/>
+            </svg>
+            <svg xmlns="http://www.w3.org/2000/svg" class="ico-stop" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" aria-hidden="true">
+              <line x1="5.5" y1="5.5" x2="12.5" y2="12.5"/>
+              <line x1="12.5" y1="5.5" x2="5.5" y2="12.5"/>
+            </svg>
+          </button>
+
+          <span id="private-badge" class="private-badge mono" hidden="hidden" title="Janela privada · sem histórico nem sessão salva">PRIVADO</span>
+
+          <span class="bar-divider only-top-layout" aria-hidden="true"></span>
+
+          <div id="top-tabs-host" class="tabs-host only-top-layout">
+            <div id="tabs-top" class="tabs-strip" role="tablist" aria-label="Abas abertas"></div>
+            <button id="btn-new-tab-top" class="icon-btn new-tab-btn" type="button" title="Nova aba (Ctrl+T)" aria-label="Nova aba">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" aria-hidden="true">
+                <line x1="8" y1="3.5" x2="8" y2="12.5"/>
+                <line x1="3.5" y1="8" x2="12.5" y2="8"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Center: Whisper-Quiet Centered Omnibox Pill (flanked by native window drag space) -->
+        <div class="bar-center drag-region" id="titlebar-drag-spacer">
+          <div class="omnibox-wrap no-drag">
+            <form id="navigation-form" class="omnibox" autocomplete="off">
+              <button id="security-badge" class="security-badge" type="button" data-state="internal" title="Informações e segurança do site" aria-label="Informações do site">
+                <svg xmlns="http://www.w3.org/2000/svg" class="sec-ico sec-lock" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="3.5" y="7.2" width="9" height="6.2" rx="1.4"/>
+                  <path d="M5.6 7.2V5.3A2.4 2.4 0 0 1 10.4 5.3V7.2"/>
+                </svg>
+                <svg xmlns="http://www.w3.org/2000/svg" class="sec-ico sec-warn" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M8 2.6L13.8 13H2.2L8 2.6Z"/>
+                  <line x1="8" y1="6.4" x2="8" y2="9.4"/>
+                  <circle cx="8" cy="11.3" r="0.6" fill="currentColor"/>
+                </svg>
+                <svg xmlns="http://www.w3.org/2000/svg" class="sec-ico sec-internal" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" aria-hidden="true">
+                  <circle cx="7.4" cy="7.4" r="4.3"/>
+                  <line x1="10.6" y1="10.6" x2="13.2" y2="13.2"/>
+                </svg>
+              </button>
+
+              <input id="address"
+                     type="text"
+                     aria-label="Endereço ou pesquisa"
+                     placeholder="Pesquisar ou endereço…"
+                     autocomplete="off"
+                     spellcheck="false" />
+
+              <div class="omnibox-actions">
+                <button id="btn-zoom-pill" class="micro-pill" type="button" hidden="hidden" title="Redefinir zoom (Ctrl+0)">100%</button>
+                <button id="btn-reader" class="mini-icon-btn" type="button" hidden="hidden" title="Modo Leitura (Ctrl+Alt+R)" aria-label="Modo Leitura">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" aria-hidden="true">
+                    <line x1="3" y1="4.5" x2="13" y2="4.5"/>
+                    <line x1="3" y1="8" x2="13" y2="8"/>
+                    <line x1="3" y1="11.5" x2="9.5" y2="11.5"/>
+                  </svg>
+                </button>
+                <button id="btn-bookmark" class="mini-icon-btn" type="button" hidden="hidden" title="Favoritar página (Ctrl+D)" aria-label="Favoritar">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M8 2.4L9.7 5.85L13.5 6.4L10.75 9.05L11.4 12.85L8 11.05L4.6 12.85L5.25 9.05L2.5 6.4L6.3 5.85L8 2.4Z"/>
+                  </svg>
+                </button>
+                <button id="btn-shield" class="shield-pill" type="button" title="Proteção contra rastreadores ativa (clique para alternar)">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M8 2.2L12.8 4.1V7.8C12.8 10.9 10.7 13 8 13.9C5.3 13 3.2 10.9 3.2 7.8V4.1L8 2.2Z"/>
+                  </svg>
+                  <span id="shield-count">0</span>
+                </button>
+              </div>
+            </form>
+
+            <!-- Instant Omnibox Command Palette Dropdown -->
+            <div id="omnibox-dropdown" class="omnibox-dropdown" hidden="hidden" role="listbox" aria-label="Sugestões"></div>
+          </div>
+        </div>
+
+        <!-- Right: Downloads Indicator + Quiet Sage RAM + Zen + 2-Line Minimal Menu + Native Window Controls -->
+        <div class="bar-right no-drag">
+          <button id="btn-downloads" class="dl-pill mono" type="button" hidden="hidden" title="Downloads (Ctrl+J)" aria-label="Downloads">
+            <span id="dl-pill-label">↓</span>
+          </button>
+
+          <button id="btn-ram-pill" class="ram-readout mono" type="button" title="Monitor de memória (Ctrl+Shift+M)">
+            <span id="ram-value">— MB</span>
+          </button>
+
+          <button id="btn-zen" class="icon-btn" type="button" title="Modo Zen (F11)" aria-label="Modo Zen">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3.75 6.75V3.75H6.75M11.25 3.75H14.25V6.75M14.25 11.25V14.25H11.25M6.75 14.25H3.75V11.25"/>
+            </svg>
+          </button>
+
+          <button id="btn-menu" class="icon-btn" type="button" title="Menu e ajustes rápidos" aria-label="Menu" aria-haspopup="true" aria-expanded="false">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" aria-hidden="true">
+              <line x1="3.5" y1="6.75" x2="14.5" y2="6.75"/>
+              <line x1="3.5" y1="11.25" x2="14.5" y2="11.25"/>
+            </svg>
+          </button>
+
+          <div id="window-controls" class="window-controls" aria-label="Controles da janela">
+            <button class="win-btn" data-win-action="minimize" type="button" title="Minimizar" aria-label="Minimizar">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.15" aria-hidden="true">
+                <line x1="2" y1="6.5" x2="10" y2="6.5"/>
+              </svg>
+            </button>
+            <button class="win-btn win-max" data-win-action="maximize" type="button" title="Maximizar / Restaurar" aria-label="Maximizar">
+              <svg xmlns="http://www.w3.org/2000/svg" class="ico-max" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.15" aria-hidden="true">
+                <rect x="2.25" y="2.25" width="7.5" height="7.5" rx="1"/>
+              </svg>
+              <svg xmlns="http://www.w3.org/2000/svg" class="ico-restore" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.15" aria-hidden="true">
+                <rect x="2" y="3.75" width="6.25" height="6.25" rx="0.8"/>
+                <path d="M4.2 3.75V2.5A0.9 0.9 0 0 1 5.1 1.6H9.5A0.9 0.9 0 0 1 10.4 2.5V6.9A0.9 0.9 0 0 1 9.5 7.8H8.25"/>
+              </svg>
+            </button>
+            <button class="win-btn win-close" data-win-action="close" type="button" title="Fechar" aria-label="Fechar">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" aria-hidden="true">
+                <line x1="2.75" y1="2.75" x2="9.25" y2="9.25"/>
+                <line x1="9.25" y1="2.75" x2="2.75" y2="9.25"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Hairline Loading Progress Indicator -->
+      <div id="load-progress" aria-hidden="true"><div id="load-progress-bar"></div></div>
+    </header>
+
+    <!-- Main Workspace: Optional Vertical Sidebar (Ctrl+B) + Stage -->
+    <div id="workspace">
+      <aside id="sidebar" aria-label="Abas verticais">
+        <div class="sidebar-top">
+          <button id="btn-brand-home" class="sidebar-brand" type="button" title="Início · Nous">
+            <span class="sidebar-title serif">nous</span>
+          </button>
+          <button id="btn-sidebar-collapse" class="icon-btn subtle" type="button" title="Recolher barra lateral" aria-label="Recolher barra lateral">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M9.8 4L5.8 8L9.8 12"/>
+            </svg>
+          </button>
+        </div>
+
+        <button id="btn-new-tab-side" class="sidebar-new-tab" type="button" title="Nova aba (Ctrl+T)">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" aria-hidden="true">
+            <line x1="8" y1="3.5" x2="8" y2="12.5"/>
+            <line x1="3.5" y1="8" x2="12.5" y2="8"/>
+          </svg>
+          <span>Nova aba</span>
+          <kbd>Ctrl+T</kbd>
+        </button>
+
+        <div id="tabs-pinned-side" class="tabs-pinned-grid" hidden="hidden"></div>
+        <div id="tabs-side" class="tabs-vertical-list" role="tablist" aria-label="Abas"></div>
+
+        <div class="sidebar-footer">
+          <button id="btn-side-sleep" class="sidebar-util-btn" type="button" title="Hibernar abas inativas para liberar RAM">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12.4 9.7A5 5 0 0 1 6.3 3.6A5.2 5.2 0 1 0 12.4 9.7Z"/>
+            </svg>
+            <span>Hibernar</span>
+          </button>
+          <button id="btn-side-memory" class="sidebar-util-btn" type="button" title="Monitor de Memória (Ctrl+Shift+M)">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M2.5 11.2L5.8 7.6L8.7 9.5L13.5 4.4"/>
+            </svg>
+            <span>Memória</span>
+          </button>
+          <button id="btn-side-config" class="sidebar-util-btn" type="button" title="Preferências (Ctrl+,)">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="8" cy="8" r="2.1"/>
+              <path d="M8 2.4V3.7M8 12.3V13.6M2.4 8H3.7M12.3 8H13.6M4 4L5 5M11 11L12 12M12 4L11 5M5 11L4 12"/>
+            </svg>
+            <span>Ajustes</span>
+          </button>
+        </div>
+      </aside>
+
+      <!-- Stage: Native Internal Chrome Views (0 content process RAM) + Sandboxed Gecko <browser> Elements -->
+      <main id="stage">
+        <section id="internal-stage" hidden="hidden" aria-live="polite"></section>
+        <xul:stack id="pages" flex="1"></xul:stack>
+
+        <!-- Floating Inline Find Bar (Ctrl+F) -->
+        <div id="find-bar" class="find-bar" hidden="hidden" role="dialog" aria-label="Localizar na página">
+          <svg xmlns="http://www.w3.org/2000/svg" class="find-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" aria-hidden="true">
+            <circle cx="7.2" cy="7.2" r="4.5"/>
+            <line x1="10.6" y1="10.6" x2="13.6" y2="13.6"/>
+          </svg>
+          <input id="find-input" type="text" placeholder="Localizar na página…" autocomplete="off" spellcheck="false" />
+          <span id="find-status" class="find-status mono"></span>
+          <button id="find-prev" class="mini-icon-btn" type="button" title="Anterior (Shift+Enter)" aria-label="Ocorrência anterior">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5L7 5L10.5 8.5"/></svg>
+          </button>
+          <button id="find-next" class="mini-icon-btn" type="button" title="Próxima (Enter)" aria-label="Próxima ocorrência">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 5.5L7 9L10.5 5.5"/></svg>
+          </button>
+          <button id="find-close" class="mini-icon-btn" type="button" title="Fechar (Esc)" aria-label="Fechar busca">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" aria-hidden="true"><line x1="3.8" y1="3.8" x2="10.2" y2="10.2"/><line x1="10.2" y1="3.8" x2="3.8" y2="10.2"/></svg>
+          </button>
+        </div>
+
+        <!-- Bottom-Left Whisper-Quiet Link Hover Preview -->
+        <div id="link-hover-pill" class="link-hover-pill mono" hidden="hidden"></div>
+
+        <!-- Subtle Status / Toast -->
+        <div id="toast" class="toast" hidden="hidden" role="status"></div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Site Security & Controls Popover (click lock icon) -->
+  <div id="site-popover" class="popover-card site-popover" hidden="hidden" role="dialog" aria-label="Segurança do site">
+    <div class="popover-kicker mono" id="site-pop-kicker">CONEXÃO SEGURA</div>
+    <div class="site-pop-host" id="site-pop-host">nous</div>
+    <div class="popover-divider"></div>
+    <div class="popover-list" id="site-pop-body"></div>
+  </div>
+
+  <!-- Downloads Quick Popover -->
+  <div id="downloads-popover" class="popover-card downloads-popover" hidden="hidden" role="dialog" aria-label="Downloads">
+    <div class="dl-pop-head">
+      <span class="popover-label">Downloads</span>
+      <button id="btn-dl-open-page" class="dl-pop-link mono" type="button">Ver todos ↗</button>
+    </div>
+    <div id="downloads-popover-list" class="dl-pop-list"></div>
+  </div>
+
+  <!-- Quick Settings & Controls Floating Popover -->
+  <div id="menu-popover" class="popover-card" hidden="hidden" role="menu" aria-label="Menu do Nous">
+    <div class="popover-section">
+      <div class="popover-label">Superfície</div>
+      <div class="swatch-row">
+        <button class="swatch-btn" data-set-theme="kanso" type="button"><span class="swatch s-kanso"></span>Kanso</button>
+        <button class="swatch-btn" data-set-theme="washi" type="button"><span class="swatch s-washi"></span>Washi</button>
+        <button class="swatch-btn" data-set-theme="sumi" type="button"><span class="swatch s-sumi"></span>Sumi</button>
+        <button class="swatch-btn" data-set-theme="stone" type="button"><span class="swatch s-stone"></span>Stone</button>
+      </div>
+    </div>
+
+    <div class="popover-section">
+      <div class="popover-label">Perfil de Leveza</div>
+      <div class="segmented" role="group" aria-label="Perfil de desempenho">
+        <button class="seg-btn" data-set-perf="eco" type="button">Eco</button>
+        <button class="seg-btn" data-set-perf="balanced" type="button">Equilibrado</button>
+        <button class="seg-btn" data-set-perf="turbo" type="button">Turbo</button>
+      </div>
+    </div>
+
+    <div class="popover-section">
+      <div class="popover-label">Layout</div>
+      <div class="segmented" role="group" aria-label="Layout das abas">
+        <button class="seg-btn" data-set-layout="top" type="button">Barra Única</button>
+        <button class="seg-btn" data-set-layout="sidebar" type="button">Barra Lateral</button>
+      </div>
+    </div>
+
+    <div class="popover-divider"></div>
+
+    <div class="popover-list">
+      <button class="menu-row" data-menu-action="new-window" type="button">
+        <span>Nova janela</span>
+        <kbd>Ctrl+N</kbd>
+      </button>
+      <button class="menu-row" data-menu-action="private-window" type="button">
+        <span>Nova janela privada</span>
+        <kbd>Ctrl+Shift+P</kbd>
+      </button>
+      <button class="menu-row" data-menu-action="open-downloads" type="button">
+        <span>Downloads</span>
+        <kbd>Ctrl+J</kbd>
+      </button>
+      <button class="menu-row" data-menu-action="open-history" type="button">
+        <span>Histórico</span>
+        <kbd>Ctrl+H</kbd>
+      </button>
+      <button class="menu-row" data-menu-action="open-bookmarks" type="button">
+        <span>Favoritos</span>
+        <kbd>Ctrl+Shift+O</kbd>
+      </button>
+    </div>
+
+    <div class="popover-divider"></div>
+
+    <div class="popover-list">
+      <button class="menu-row" data-menu-action="toggle-blocker" type="button">
+        <span>Bloqueador de rastreadores</span>
+        <span class="menu-pill" id="menu-blocker-state">Ativo</span>
+      </button>
+      <button class="menu-row" data-menu-action="hibernate-others" type="button">
+        <span>Hibernar abas inativas</span>
+        <kbd>RAM</kbd>
+      </button>
+      <button class="menu-row" data-menu-action="optimize-ram" type="button">
+        <span>Otimizar memória agora</span>
+        <kbd>GC</kbd>
+      </button>
+      <button class="menu-row" data-menu-action="print" type="button">
+        <span>Imprimir / Salvar PDF</span>
+        <kbd>Ctrl+P</kbd>
+      </button>
+      <button class="menu-row" data-menu-action="clear-data" type="button">
+        <span>Limpar dados de navegação…</span>
+        <kbd>Ctrl+Shift+Del</kbd>
+      </button>
+    </div>
+
+    <div class="popover-divider"></div>
+
+    <div class="popover-list">
+      <button class="menu-row" data-menu-action="open-memory" type="button">
+        <span>Monitor de Memória</span>
+        <kbd>Ctrl+Shift+M</kbd>
+      </button>
+      <button class="menu-row" data-menu-action="open-config" type="button">
+        <span>Preferências</span>
+        <kbd>Ctrl+,</kbd>
+      </button>
+    </div>
+  </div>
+
+  <!-- Tab Context Menu -->
+  <div id="tab-context-menu" class="context-menu" hidden="hidden" role="menu">
+    <button class="ctx-item" data-ctx="new" type="button">Nova aba</button>
+    <button class="ctx-item" data-ctx="duplicate" type="button">Duplicar aba</button>
+    <button class="ctx-item" data-ctx="pin" type="button" id="ctx-pin-label">Fixar aba</button>
+    <button class="ctx-item" data-ctx="mute" type="button" id="ctx-mute-label">Silenciar aba</button>
+    <button class="ctx-item" data-ctx="hibernate" type="button" id="ctx-hibernate-label">Hibernar aba (liberar RAM)</button>
+    <div class="popover-divider"></div>
+    <button class="ctx-item" data-ctx="close-others" type="button">Fechar outras abas</button>
+    <button class="ctx-item danger" data-ctx="close" type="button">Fechar aba</button>
+  </div>
+
+  <!-- Web Content Context Menu (Right-click inside pages) -->
+  <div id="page-context-menu" class="context-menu page-ctx-menu" hidden="hidden" role="menu"></div>
+
+  <!-- Clear Browsing Data Modal (Ctrl+Shift+Del) -->
+  <div id="clear-data-backdrop" class="modal-backdrop" hidden="hidden">
+    <div id="clear-data-modal" class="kanso-modal" role="dialog" aria-modal="true" aria-label="Limpar dados de navegação">
+      <div class="popover-kicker mono">PRIVACIDADE · LIMPEZA</div>
+      <div class="modal-title serif">Limpar dados de navegação</div>
+      <div class="modal-options">
+        <label class="modal-check"><input type="checkbox" id="clr-history" checked="checked" /><span>Histórico de navegação local</span></label>
+        <label class="modal-check"><input type="checkbox" id="clr-cookies" checked="checked" /><span>Cookies e sessões de sites</span></label>
+        <label class="modal-check"><input type="checkbox" id="clr-cache" checked="checked" /><span>Cache de imagens e arquivos</span></label>
+        <label class="modal-check"><input type="checkbox" id="clr-storage" /><span>Armazenamento local (IndexedDB / LocalStorage)</span></label>
+      </div>
+      <div class="segmented" id="clr-range-seg">
+        <button class="seg-btn active" data-clr-range="3600000" type="button">Última hora</button>
+        <button class="seg-btn" data-clr-range="86400000" type="button">24 horas</button>
+        <button class="seg-btn" data-clr-range="0" type="button">Tudo</button>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-clr-cancel" class="btn-ghost" type="button">Cancelar</button>
+        <button id="btn-clr-confirm" class="btn-primary" type="button">Limpar agora</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick Tab & Command Palette (Ctrl+Shift+A) -->
+  <div id="palette-backdrop" class="modal-backdrop" hidden="hidden">
+    <div id="tab-palette-modal" class="kanso-modal palette-modal" role="dialog" aria-modal="true" aria-label="Buscar abas e comandos">
+      <input id="palette-input" class="palette-input" type="text" placeholder="Buscar aba aberta, fechada ou comando…" autocomplete="off" spellcheck="false" />
+      <div id="palette-list" class="palette-list"></div>
+    </div>
+  </div>
+</body>
+</html>

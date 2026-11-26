@@ -1710,6 +1710,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nous-launcher"
+version = "0.2.0"
+
+[[package]]
 name = "nous-layout"
 version = "0.1.0"
 dependencies = [

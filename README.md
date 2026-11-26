@@ -1,109 +1,62 @@
 # Nous
 
-Navegador web feito em Rust, com motor próprio, pensado para gastar o mínimo de RAM e CPU.
-A interface lembra a de navegadores conhecidos (abas no topo, barra de endereço), mas a
-identidade visual e o motor são do Nous.
+Navegador desktop minimalista de baixo consumo sobre o motor **Firefox Gecko 153 ESR**, com interface **Kanso Zen (Barra Única de 44px)**, páginas internas nativas de 0 MB de conteúdo, bloqueador de rastreadores O(1) e hibernação automática de abas.
 
-## Princípios
+> O repositório também mantém em `crates/` o experimento paralelo de motor próprio em Rust (`nous-app`, `nous-js`, `nous-html`, `nous-layout`, etc.) e o executável nativo fino `crates/nous-launcher` (`nous.exe`).
 
-- **Leve primeiro.** Cada decisão de arquitetura é medida em memória e processamento.
-  Nada roda sem necessidade: a janela só redesenha quando algo muda.
-- **Rust de ponta a ponta.** Interface, rede, HTML, CSS, layout, pintura e JavaScript em Rust.
-- **Motor próprio.** Montado com peças Rust testadas (html5ever, Vello, Parley…) e um motor
-  JavaScript escrito aqui. Cada peça fica atrás de uma API nossa, então pode ser trocada.
-- **Padrões da web.** O alvo de compatibilidade são as especificações WHATWG/W3C, medidas
-  pelos mesmos testes que os grandes navegadores usam: web-platform-tests e test262.
+## Destaques do Nous Desktop (Gecko 153 ESR · Kanso Zen)
 
-## Arquitetura
+- **Barra única minimalista (44px)**: navegação, abas em pílula com ponto sálvia, omnibox central com paleta de comandos, leitura ao vivo de RAM, modo Zen (`F11`) e controles nativos de janela — com barra lateral vertical opcional (`Ctrl+B`).
+- **4 superfícies curadas**: **Kanso** *(carvão fosco)*, **Washi** *(papel claro)*, **Sumi** *(OLED preto puro)* e **Stone** *(pedra quente)*, sincronizadas com o tema claro/escuro dos sites.
+- **Leve por arquitetura**:
+  - Páginas internas (`nous://nova-aba`, `nous://memoria`, `nous://config`, `nous://downloads`, `nous://historico`, `nous://favoritos`) renderizadas direto no chrome com **0 MB de processo de conteúdo**.
+  - Hibernação automática de abas inativas e **restauração de sessão já hibernada (0 MB até o clique)**.
+  - Bloqueador nativo de rastreadores O(1) com allowlist por domínio.
+  - Zero telemetria, zero runtime ML/ONNX, zero SafeBrowsing DBs, zero SQLite Places/FormHistory/Signons e zero processos pré-alocados.
+  - Consumo verificado: **~83 MB PrivWS** na nova aba e **~106 MB PrivWS** em `https://example.com`.
+- **Navegador completo para uso diário**: menu de contexto web (botão direito), favicons reais, prévia de links no hover, `Ctrl+Clique` / clique do meio, `<select>` / seletores nativos, tela cheia HTML5, downloads nativos (`Downloads.sys.mjs`), PDF nativo, impressão/Salvar PDF (`Ctrl+P`), modo leitura (`Ctrl+Alt+R`), múltiplas janelas (`Ctrl+N`), janela privada (`Ctrl+Shift+P`), limpeza de dados (`Ctrl+Shift+Del`), arrastar abas para reordenar e importar/exportar favoritos HTML.
 
-| Crate | Função |
-|---|---|
-| `nous-app` | Binário `nous`: janela, eventos, abas e sessão |
-| `nous-ui` | Interface (abas, omnibox, botões, temas) desenhada com Vello |
-| `nous-engine` | API do motor: WebView, navegação, histórico, páginas internas |
-| `nous-net` | Rede: HTTP/1.1 e HTTP/2, TLS (rustls + ring), cookies, `file:` e `data:` |
-| `nous-html` | Parser HTML (html5ever) gravando direto no DOM do Nous |
-| `nous-dom` | DOM em arena: nós compactos ligados por índices, nomes internados |
-| `nous-style` | Cascata CSS (provisória até o Stylo) que gera o `ComputedStyle` |
-| `nous-layout` | Layout de blocos e texto (Parley) |
-| `nous-paint` | Lista de desenho para o Vello (GPU via wgpu) |
-| `nous-js` | Motor JavaScript próprio: parser oxc, bytecode de registradores, GC |
-| `tools/test262-runner` | Roda a suíte oficial test262 no `nous-js` |
+## Instalar o executável (`nous.exe`) no Windows
 
-Detalhes em [docs/arquitetura.md](docs/arquitetura.md).
-
-## Compilar e rodar
-
-Pré-requisitos: Rust estável (via [rustup](https://rustup.rs)). No Windows, também o
-Visual Studio Build Tools com a carga de trabalho de C++. No Linux, as bibliotecas de
-janela: `libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libvulkan-dev`.
-
-```sh
-cargo run --release
-```
-
-Testes de todo o workspace:
-
-```sh
-cargo test --workspace
-```
-
-No Windows, se o `cargo` não achar o linker (terminal comum, ou Build Tools sem as
-ferramentas `Hostx64`), use o script que carrega o ambiente do Visual Studio:
+Requer Rust estável + Visual Studio Build Tools (usado automaticamente via `scripts/cargo.ps1`) e o runtime Firefox 153 ESR em `target/nous-gecko-runtime/core` (ou instalado no sistema).
 
 ```powershell
-.\scripts\cargo.ps1 run --release
+.\scripts\instalar-nous.ps1
 ```
 
-Captura sem janela (testes visuais): `nous --captura saida.png https://example.com`
-(acrescente `--claro` para o tema claro). Medição de RAM: `.\scripts\medir-ram.ps1`.
+Isso compila `nous.exe` com ícone Kanso, empacota o runtime Gecko enxuto (~80 MB menor em disco) em `%LOCALAPPDATA%\Programs\Nous\nous.exe`, cria atalhos no **Menu Iniciar** e na **Área de Trabalho** e registra o Nous em **Configurações → Aplicativos padrão**.
 
-## Prévia desktop com Gecko no Windows
-
-A prévia tem uma janela do Nous com abas e barra de endereços. Ela usa o runtime
-do Firefox 153 ESR e guarda o perfil de teste em `target/nous-gecko-runtime/nous-profile`.
+Para rodar direto do repositório sem instalar:
 
 ```powershell
-.\scripts\nous-gecko.ps1 -FirefoxPath 'C:\caminho\para\firefox.exe'
+.\scripts\nous-gecko.ps1
 ```
 
-Com o runtime extraído em `target/nous-gecko-runtime/core`, o parâmetro
-`-FirefoxPath` pode ser omitido. Use `-Url` para abrir uma página ao iniciar.
-O [Firefox ESR está disponível no site da Mozilla](https://www.mozilla.org/firefox/enterprise/).
+Para medir RAM e CPU ocioso:
 
-## Atalhos de teclado
+```powershell
+.\scripts\medir-gecko.ps1
+.\scripts\medir-gecko.ps1 -Url https://example.com
+```
+
+## Atalhos principais
 
 | Atalho | Ação |
 |---|---|
-| `Ctrl+T` | Nova aba |
-| `Ctrl+W` | Fechar aba |
-| `Ctrl+L` | Ir para a barra de endereço |
-| `Ctrl+Tab` | Próxima aba |
-| `F5` | Recarregar |
-| `Alt+←` / `Alt+→` | Voltar / avançar |
+| `Ctrl+T` / `Ctrl+W` / `Ctrl+Shift+T` | Nova aba / Fechar aba / Reabrir fechada |
+| `Ctrl+N` / `Ctrl+Shift+P` | Nova janela / Nova janela privada |
+| `Ctrl+L` / `Ctrl+Shift+A` | Barra de endereço / Paleta rápida de abas |
+| `Ctrl+B` / `F11` | Barra lateral / Modo Zen |
+| `Ctrl+J` / `Ctrl+H` / `Ctrl+Shift+O` | Downloads / Histórico / Favoritos |
+| `Ctrl+D` / `Ctrl+F` / `Ctrl+P` / `Ctrl+S` | Favoritar / Buscar / Imprimir PDF / Salvar página |
+| `Ctrl+Alt+R` / `Ctrl+U` / `F12` | Modo Leitura / Código-fonte / Console DevTools |
+| `Ctrl+Shift+M` / `Ctrl+,` / `Ctrl+Shift+Del` | Monitor de Memória / Preferências / Limpar dados |
 
-## Páginas internas
+## Motor experimental em Rust (`crates/`)
 
-- `nous://nova-aba` — página de nova aba.
-- `nous://memoria` — memória usada pelo processo e por aba.
-
-## Status
-
-| Fase | O que entrega | Situação |
-|---|---|---|
-| 0. Fundação | Workspace, CI nos 3 sistemas, janela com interface estilo navegador | em andamento |
-| 1. Motor estático | Rede, HTML→DOM, CSS, layout, texto, imagens, rolagem, links | começou: páginas simples sem JavaScript |
-| 2. JavaScript v1 | Interpretador, GC, funções nativas principais | esqueleto |
-| 3. JavaScript ↔ DOM | Web IDL, event loop, eventos, fetch, Canvas 2D | a fazer |
-| 4. Beta do produto | Multiprocesso com sandbox, abas dormindo, bloqueador, instaladores, atualização | a fazer |
-| 5. Desempenho e web pesada | JIT (Cranelift), GC incremental, WebGL/WebGPU, mídia | a fazer |
-
-## test262 (JavaScript)
-
-```sh
-git clone --depth 1 https://github.com/tc39/test262
-cargo run -p test262-runner --release -- test262
+```powershell
+.\scripts\cargo.ps1 run --release
+.\scripts\cargo.ps1 test --workspace
 ```
 
-A pasta `test262/` está no `.gitignore`. O runner mostra quantos testes passam; o número
-é registrado a cada marco.
+Detalhes da arquitetura Rust experimental em [docs/arquitetura.md](docs/arquitetura.md) e benchmarks em [docs/benchmarks.md](docs/benchmarks.md).
