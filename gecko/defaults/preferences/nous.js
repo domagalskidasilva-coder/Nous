@@ -24,7 +24,11 @@ pref("browser.display.foreground_color", "#e8e5de");
 pref("layers.gpu-process.enabled", false);
 pref("network.process.enabled", false);
 pref("media.utility-process.enabled", false);
-// Keep RDD enabled on-demand so YouTube/MP4/WebM video decoding works natively
+// Allow the on-demand RDD process to decode audio (Opus/AAC/MP3/Vorbis/FLAC)
+// without spawning an extra Utility process; prevents YouTube playback error
+// "RDD is not allowed to perform audio decoding" while keeping RAM ultra-low.
+pref("media.allow-audio-non-utility", true);
+// Keep RDD enabled on-demand so YouTube/MP4/WebM video & audio decoding work natively
 // in Gecko 153 without NS_ERROR_DOM_MEDIA_FATAL_ERR.
 pref("media.rdd-process.enabled", true);
 pref("sanity-test.disabled", true);
